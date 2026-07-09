@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-200 antialiased;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-zinc-700/70;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-zinc-600;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Markdown 正文 */
+.md-body {
+  @apply text-[15px] leading-7 break-words;
+}
+.md-body h1 {
+  @apply mt-5 mb-3 text-xl font-bold text-zinc-100;
+}
+.md-body h2 {
+  @apply mt-5 mb-2 border-b border-zinc-800 pb-1.5 text-lg font-semibold text-zinc-100;
+}
+.md-body h3 {
+  @apply mt-4 mb-2 text-base font-semibold text-zinc-100;
+}
+.md-body p {
+  @apply my-2;
+}
+.md-body ul {
+  @apply my-2 list-disc pl-6;
+}
+.md-body ol {
+  @apply my-2 list-decimal pl-6;
+}
+.md-body li {
+  @apply my-1;
+}
+.md-body code:not(pre code) {
+  @apply rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[13px] text-amber-300;
+}
+.md-body pre {
+  @apply my-3 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-900 p-3 font-mono text-[13px] leading-6;
+}
+.md-body blockquote {
+  @apply my-2 border-l-2 border-indigo-500/60 pl-3 text-zinc-400;
+}
+.md-body table {
+  @apply my-3 w-full border-collapse text-sm;
+}
+.md-body th,
+.md-body td {
+  @apply border border-zinc-800 px-2.5 py-1.5 text-left;
+}
+.md-body th {
+  @apply bg-zinc-900 font-medium text-zinc-300;
+}
+.md-body a {
+  @apply text-indigo-400 underline decoration-indigo-400/40 underline-offset-2 hover:text-indigo-300;
+}
+.md-body hr {
+  @apply my-4 border-zinc-800;
+}
+
+/* 引用角标 */
+.citation-chip {
+  @apply mx-0.5 inline-flex h-4.5 min-w-4.5 cursor-pointer items-center justify-center rounded bg-indigo-500/20 px-1 align-super font-mono text-[10px] font-semibold text-indigo-300 no-underline hover:bg-indigo-500/40;
+}
+
+@keyframes blink-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.streaming-caret::after {
+  content: "▍";
+  @apply ml-0.5 text-indigo-400;
+  animation: blink-caret 0.8s infinite;
+}

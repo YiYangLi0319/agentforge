@@ -1,0 +1,27 @@
+# Render 一键蓝图（Blueprint）。在 Render 控制台 New + > Blueprint 选中本仓库即可。
+# 免费实例使用临时文件系统（SQLite 数据在重启/重新部署后重置，演示足够）；
+# 需要持久化可加 disk（需付费实例）或改用 Render 的 PostgreSQL。
+services:
+  - type: web
+    name: agentforge
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: AGENTFORGE_ENV
+        value: prod
+      - key: LLM_PROVIDER
+        value: deepseek
+      - key: LLM_API_KEY
+        sync: false # 在 Render 面板手动填入你的 DeepSeek Key
+      - key: LLM_MODEL
+        value: deepseek-chat
+      - key: EMBEDDING_PROVIDER
+        value: mock
+      - key: SEARCH_PROVIDER
+        value: auto
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:///./agentforge.db

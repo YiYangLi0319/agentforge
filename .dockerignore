@@ -1,0 +1,35 @@
+# 版本控制与 IDE
+.git
+.github
+.idea
+.vscode
+
+# Python
+**/__pycache__
+**/*.pyc
+backend/.venv
+backend/.mypy_cache
+backend/.ruff_cache
+backend/.pytest_cache
+backend/htmlcov
+backend/.coverage
+backend/evals_reports
+backend/tests
+
+# 本地数据库与数据
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+backend/data
+backend/static
+
+# Node
+frontend/node_modules
+frontend/dist
+
+# 环境与文档
+.env
+docs
+*.md
+plan
