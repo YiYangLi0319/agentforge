@@ -22,6 +22,26 @@ export class ApiError extends Error {
   }
 }
 
+/** 后端错误 detail 可能是字符串、FastAPI 校验错误数组或对象，统一转成可读文字。 */
+function normalizeDetail(detail: unknown): string | undefined {
+  if (detail == null) return undefined;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d) => (d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : String(d)))
+      .filter(Boolean);
+    return msgs.length ? msgs.join("；") : undefined;
+  }
+  if (typeof detail === "object" && "msg" in (detail as object)) {
+    return String((detail as { msg: unknown }).msg);
+  }
+  try {
+    return JSON.stringify(detail);
+  } catch {
+    return undefined;
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const resp = await fetch(path, {
     ...options,
@@ -42,7 +62,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     let detail = `HTTP ${resp.status}`;
     try {
       const body = await resp.json();
-      detail = body.detail ?? detail;
+      detail = normalizeDetail(body.detail) ?? detail;
     } catch {
       /* ignore */
     }
