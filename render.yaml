@@ -1,6 +1,10 @@
 # Render 一键蓝图（Blueprint）。在 Render 控制台 New + > Blueprint 选中本仓库即可。
-# 免费实例使用临时文件系统（SQLite 数据在重启/重新部署后重置，演示足够）；
-# 需要持久化可加 disk（需付费实例）或改用 Render 的 PostgreSQL。
+# 使用 Render 托管 PostgreSQL（含 pgvector），数据持久化、重新部署不丢失。
+databases:
+  - name: agentforge-db
+    plan: free
+    postgresMajorVersion: "16"
+
 services:
   - type: web
     name: agentforge
@@ -23,5 +27,15 @@ services:
         value: mock
       - key: SEARCH_PROVIDER
         value: auto
+      # 由上面的托管 PostgreSQL 自动注入（连接串会被应用规范化为 asyncpg 驱动）
       - key: DATABASE_URL
-        value: sqlite+aiosqlite:///./agentforge.db
+        fromDatabase:
+          name: agentforge-db
+          property: connectionString
+      # 可选：管理员用户名 / 注册邀请码 / 每日额度
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: REGISTRATION_INVITE_CODE
+        sync: false
+      - key: DAILY_TOKEN_QUOTA
+        value: "200000"

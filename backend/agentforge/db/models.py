@@ -216,6 +216,7 @@ class ResearchReport(Base):
     sources: Mapped[list] = mapped_column(JSON, default=list)
     review: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="running")
+    share_token: Mapped[str | None] = mapped_column(String(32), nullable=True, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -59,13 +59,15 @@ git push -u origin main
 3. 在环境变量里填上表变量
 4. Networking → 绑定一个 `.zeabur.app` 域名
 
-## 四、数据持久化（可选）
+## 四、数据持久化（已内置）
 
-免费档多为**临时文件系统**：重新部署/重启后 SQLite 数据会重置（账号、知识库、历史会清空）。要持久化，二选一：
+`render.yaml` 蓝图**已自动创建一个免费 Render PostgreSQL** 并注入 `DATABASE_URL`，数据持久化、重新部署不丢失（账号、知识库、历史都保留）。
 
-- **加挂载盘**：Render/Railway 付费实例可挂 Disk，把 `DATABASE_URL` 指到盘内路径，如 `sqlite+aiosqlite:////data/agentforge.db`
-- **用托管 PostgreSQL**（推荐生产）：在平台加一个 Postgres 服务，把 `DATABASE_URL` 设为其连接串（`postgresql+asyncpg://...`）。
-  - 若要真实向量检索，需数据库支持 `pgvector`（Render 的 Postgres 已内置；否则应用会自动降级为进程内向量计算，功能不受影响）。
+- 应用会自动把 Render 的连接串（`postgres://...`）规范化为 asyncpg 驱动，并在启动时建表、启用 `pgvector` 扩展。
+- 若用 Railway/Zeabur：在平台加一个 PostgreSQL 服务，把它的连接串填到 `DATABASE_URL` 即可（`postgres://` 或 `postgresql://` 都会被自动识别）。
+- 不想用 Postgres 也可改回 `DATABASE_URL=sqlite+aiosqlite:///./agentforge.db`（但免费档文件系统临时，会随重部署清空）。
+
+> Render 免费 PostgreSQL 有效期约 90 天，到期需在面板续期或新建。
 
 ## 五、上线后注意
 

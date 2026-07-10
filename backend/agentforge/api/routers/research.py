@@ -112,6 +112,43 @@ async def list_research(
     ]
 
 
+@router.post("/{report_id}/share")
+async def share_research(
+    report_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> dict:
+    """为报告生成公开只读分享链接（幂等：已存在则返回原 token）。"""
+    import secrets
+
+    r = (
+        await db.execute(
+            select(ResearchReport).where(ResearchReport.id == report_id, ResearchReport.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if r is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    if r.status != "succeeded":
+        raise HTTPException(status_code=400, detail="仅可分享已完成的报告")
+    if not r.share_token:
+        r.share_token = secrets.token_urlsafe(16)[:32]
+        await db.commit()
+    return {"share_token": r.share_token, "path": f"/share/research/{r.share_token}"}
+
+
+@router.delete("/{report_id}/share", status_code=204)
+async def unshare_research(
+    report_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    r = (
+        await db.execute(
+            select(ResearchReport).where(ResearchReport.id == report_id, ResearchReport.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if r is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    r.share_token = None
+    await db.commit()
+
+
 @router.get("/{report_id}")
 async def get_research(
     report_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
@@ -134,5 +171,6 @@ async def get_research(
         "report_md": r.report_md,
         "sources": r.sources,
         "review": r.review,
+        "share_token": r.share_token,
         "created_at": r.created_at.isoformat(),
     }

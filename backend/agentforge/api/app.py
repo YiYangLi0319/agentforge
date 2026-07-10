@@ -151,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         feedback,
         knowledge,
         meta,
+        public,
         research,
         runs,
         tools,
@@ -170,6 +171,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(feedback.router, prefix="/api/feedback", tags=["feedback"])
     app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
     app.include_router(datasets.router, prefix="/api/datasets", tags=["datasets"])
+    app.include_router(public.router, prefix="/api/public", tags=["public"])
 
     _mount_frontend(app, settings)
     return app

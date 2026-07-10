@@ -18,7 +18,21 @@ class Base(DeclarativeBase):
     pass
 
 
+def normalize_db_url(url: str) -> str:
+    """规范化连接串：把 PaaS 常见的 postgres:// / postgresql:// 统一为 asyncpg 驱动。
+
+    Render/Heroku 等给出的 DATABASE_URL 形如 postgres://user:pass@host/db，
+    而本项目用 asyncpg 异步驱动，需要 postgresql+asyncpg://。
+    """
+    if url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + url[len("postgresql://") :]
+    return url
+
+
 def build_engine(database_url: str) -> AsyncEngine:
+    database_url = normalize_db_url(database_url)
     kwargs: dict = {
         "echo": False,
         "json_serializer": lambda o: json.dumps(o, ensure_ascii=False),

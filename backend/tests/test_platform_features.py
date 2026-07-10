@@ -209,6 +209,29 @@ async def test_dataset_upload_and_analyze(app, client, auth_headers):
     assert any(x["id"] == ds["id"] for x in listing)
 
 
+async def test_research_share_public_link(client, auth_headers):
+    # 发起研究并等其完成
+    posted = (await client.post("/api/research", json={"query": "分享功能测试主题"}, headers=auth_headers)).json()
+    await drain(client, posted["run_id"], auth_headers)
+    report = (await client.get(f"/api/research/{posted['report_id']}", headers=auth_headers)).json()
+    assert report["status"] == "succeeded"
+
+    # 生成分享链接
+    share = (await client.post(f"/api/research/{posted['report_id']}/share", headers=auth_headers)).json()
+    token = share["share_token"]
+    assert token and share["path"].endswith(token)
+
+    # 公开接口无需鉴权即可访问
+    pub = await client.get(f"/api/public/research/{token}")
+    assert pub.status_code == 200
+    assert pub.json()["query"] == "分享功能测试主题" and pub.json()["report_md"]
+
+    # 取消分享后失效
+    await client.delete(f"/api/research/{posted['report_id']}/share", headers=auth_headers)
+    gone = await client.get(f"/api/public/research/{token}")
+    assert gone.status_code == 404
+
+
 async def test_dataset_analyze_rejects_write_sql(app, client, auth_headers):
     csv = "a,b\n1,2\n3,4\n"
     ds = (

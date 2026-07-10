@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy import pool
 
 from agentforge.config import get_settings
-from agentforge.db.base import Base
+from agentforge.db.base import Base, normalize_db_url
 from agentforge.db import models  # noqa: F401  注册所有模型
 
 config = context.config
@@ -16,7 +16,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option("sqlalchemy.url", normalize_db_url(get_settings().database_url))
 
 target_metadata = Base.metadata
 

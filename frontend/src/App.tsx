@@ -10,6 +10,7 @@ import DataPage from "./pages/DataPage";
 import KnowledgePage from "./pages/KnowledgePage";
 import LoginPage from "./pages/LoginPage";
 import ResearchPage from "./pages/ResearchPage";
+import SharedResearchPage from "./pages/SharedResearchPage";
 import ToolsPage from "./pages/ToolsPage";
 import TracesPage from "./pages/TracesPage";
 import { useAuth } from "./stores/auth";
@@ -25,6 +26,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/share/research/:token" element={<SharedResearchPage />} />
         <Route
           element={
             <RequireAuth>

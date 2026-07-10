@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Search,
   SendHorizonal,
+  Share2,
   Telescope,
   XCircle,
 } from "lucide-react";
@@ -37,6 +38,7 @@ export default function ResearchPage() {
   const [error, setError] = useState("");
   const [history, setHistory] = useState<ResearchReportInfo[]>([]);
   const [viewing, setViewing] = useState<string | null>(null);
+  const [shareUrl, setShareUrl] = useState("");
   const abortRef = useRef<(() => void) | null>(null);
 
   const loadHistory = useCallback(() => {
@@ -124,10 +126,23 @@ export default function ResearchPage() {
     }
   };
 
+  const doShare = async () => {
+    if (!viewing) return;
+    try {
+      const r = await api.post<{ path: string }>(`/api/research/${viewing}/share`, {});
+      const url = `${location.origin}${r.path}`;
+      await navigator.clipboard.writeText(url).catch(() => undefined);
+      setShareUrl(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "分享失败");
+    }
+  };
+
   const openHistory = async (id: string) => {
     abortRef.current?.();
     reset();
     setViewing(id);
+    setShareUrl("");
     const r = await api.get<ResearchReportInfo>(`/api/research/${id}`);
     setPlan(r.plan && r.plan.sub_questions ? r.plan : null);
     setReportText(r.report_md ?? "");
@@ -256,6 +271,25 @@ export default function ResearchPage() {
                   {review.scores?.citation_quality ?? "-"}/5 · 逻辑 {review.scores?.logic ?? "-"}/5
                   {!review.passed && (running ? " · 首版未达标，正在自动修订…" : " · 首版未达标，已自动修订（下方为修订后终稿）")}
                 </span>
+              </div>
+            )}
+
+            {/* 分享（仅查看历史且有报告时） */}
+            {viewing && reportText && !running && (
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={doShare}>
+                  <Share2 size={13} /> 生成公开分享链接
+                </Button>
+                {shareUrl && (
+                  <a
+                    href={shareUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="truncate rounded-lg bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"
+                  >
+                    已复制到剪贴板：{shareUrl}
+                  </a>
+                )}
               </div>
             )}
 
