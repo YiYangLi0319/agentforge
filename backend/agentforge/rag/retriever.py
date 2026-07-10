@@ -68,7 +68,9 @@ class HybridRetriever:
     async def _vector_search(
         self, session: AsyncSession, kb_ids: list[str], query_emb: list[float], limit: int
     ) -> list[tuple[str, float]]:
-        if session.bind.dialect.name == "postgresql":
+        from agentforge.db.types import pgvector_enabled
+
+        if session.bind.dialect.name == "postgresql" and pgvector_enabled():
             emb_literal = "[" + ",".join(f"{x:.6f}" for x in query_emb) + "]"
             stmt = (
                 text(

@@ -49,15 +49,27 @@ git push -u origin main
 
 1. 登录 [railway.app](https://railway.app) → New Project → **Deploy from GitHub repo** → 选你的仓库
 2. Railway 自动识别根目录 `Dockerfile`（`railway.json` 已配好健康检查）
-3. Variables 里逐条填上表环境变量
-4. Settings → Networking → **Generate Domain**，拿到公网地址
+3. **加数据库做持久化**：项目里 **New → Database → Add PostgreSQL**
+4. 回到 web 服务的 **Variables**，加一条引用变量把库接上：
+   - `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`（Railway 变量引用语法，Postgres 为你数据库服务名）
+   - 再逐条填上表其它环境变量（`LLM_API_KEY` 等）
+5. Settings → Networking → **Generate Domain**，拿到公网地址
+
+> Railway 默认 Postgres 不带 pgvector，无需担心：应用会**自动降级为 JSON 存向量 + 进程内检索**，功能照常。若想用原生 pgvector，可改用 Railway 的 pgvector 模板部署数据库。
 
 ### 方案 C：Zeabur（国内访问友好）
 
 1. 登录 [zeabur.com](https://zeabur.com) → 新建项目 → Deploy from GitHub → 选仓库
 2. 自动识别 Dockerfile 构建
-3. 在环境变量里填上表变量
-4. Networking → 绑定一个 `.zeabur.app` 域名
+3. **加数据库做持久化**：项目里 **Add Service → Marketplace → PostgreSQL**（或搜索 `pgvector` 模板）
+4. 在 web 服务的**环境变量/Variables**里，用 Zeabur 的变量引用把库接上：
+   - `DATABASE_URL` = `${POSTGRES_CONNECTION_STRING}`（引用你添加的 Postgres 服务，具体变量名以 Zeabur 面板显示为准）
+   - 再填上表其它环境变量
+5. Networking → 绑定一个 `.zeabur.app` 域名
+
+> 同样地，Zeabur 普通 Postgres 无 pgvector 也能跑（自动降级）；选 `pgvector` 模板则启用原生向量检索。
+
+> 连接串格式无所谓：Railway/Zeabur 给的 `postgres://...` 或 `postgresql://...`，应用都会自动转成 asyncpg 驱动。
 
 ## 四、数据持久化（已内置）
 

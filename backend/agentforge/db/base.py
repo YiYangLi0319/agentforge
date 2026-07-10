@@ -52,13 +52,33 @@ def build_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def init_db(engine: AsyncEngine) -> None:
-    """初始化数据库：pg 上启用 pgvector 扩展后建表（幂等）。"""
+async def init_db(engine: AsyncEngine, use_pgvector: bool = True) -> None:
+    """初始化数据库（幂等）。
+
+    PostgreSQL 上尝试启用 pgvector 扩展：成功则向量列用原生 vector；失败或被禁用
+    则自动降级为 JSON 存储（兼容不带 pgvector 的托管 Postgres，如 Railway/Zeabur 默认库）。
+    """
+    import logging
+
     from agentforge.db import models  # noqa: F401  确保模型已注册
+    from agentforge.db.types import PGVECTOR
+
+    logger = logging.getLogger(__name__)
+
+    if engine.dialect.name == "postgresql":
+        enabled = False
+        if use_pgvector:
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                enabled = True
+            except Exception as e:  # noqa: BLE001 无 pgvector 权限/扩展则降级
+                logger.warning("pgvector 不可用，向量检索降级为 JSON+进程内计算：%s", e)
+        PGVECTOR["enabled"] = enabled
+    else:
+        PGVECTOR["enabled"] = False  # SQLite 等：JSON 存储
 
     async with engine.begin() as conn:
-        if engine.dialect.name == "postgresql":
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
 
 

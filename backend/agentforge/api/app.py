@@ -56,7 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         engine = build_engine(settings.database_url)
-        await init_db(engine)
+        await init_db(engine, use_pgvector=settings.use_pgvector)
         sessions = build_sessionmaker(engine)
 
         from agentforge.core.guardrails import GuardrailsEngine

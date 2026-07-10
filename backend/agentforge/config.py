@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     max_upload_mb: int = 20
     # 前端静态资源目录（存在则由后端同源托管，用于单镜像部署）
     static_dir: str = "static"
+    # 是否尝试使用 pgvector（PostgreSQL）；不可用会自动降级为 JSON+进程内向量检索
+    use_pgvector: bool = True
 
     # 对话模型
     llm_provider: str = "mock"
