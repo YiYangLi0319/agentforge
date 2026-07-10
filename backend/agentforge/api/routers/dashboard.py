@@ -134,6 +134,7 @@ async def dashboard_evals(
             if isinstance(v, int | float) and not isinstance(v, bool) and k != "cases"
         }
         used_suites.add(record.suite)
+        status = gate_status(record.suite, metrics)
         suites[record.suite].append(
             {
                 "id": record.id,
@@ -143,11 +144,28 @@ async def dashboard_evals(
                 "enabled_judge": record.enabled_judge,
                 "created_at": record.created_at.isoformat(),
                 # 质量门判定：与 CI/CLI 同源，未命中门限指标时为 null
-                "passed": gate_status(record.suite, metrics)["passed"],
+                "passed": status["passed"],
+                "checks": status["checks"],
             }
         )
     gates = {suite: DEFAULT_GATES.get(suite, {}) for suite in used_suites}
-    return {"suites": dict(suites), "gates": gates}
+    # 各 suite 最新一条未达标时，汇总失败指标供顶栏告警
+    alerts: list[dict] = []
+    for suite, recs in suites.items():
+        latest = recs[-1]
+        if latest["passed"] is not False:
+            continue
+        for check in latest["checks"]:
+            if check["actual"] is not None and not check["ok"]:
+                alerts.append(
+                    {
+                        "suite": suite,
+                        "metric": check["metric"],
+                        "actual": check["actual"],
+                        "min": check["min"],
+                    }
+                )
+    return {"suites": dict(suites), "gates": gates, "alerts": alerts}
 
 
 @router.get("/live")

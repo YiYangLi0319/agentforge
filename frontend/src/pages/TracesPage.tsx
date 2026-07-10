@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge, Button, EmptyState, formatCost, formatTime, statusTone, STATUS_LABEL } from "../components/ui";
 import { api } from "../lib/api";
-import type { RunCompareItem, RunComparison, RunSummary, SpanInfo } from "../lib/types";
+import type { RunCompareItem, RunComparison, RunSummary, SpanDiffRow, SpanInfo } from "../lib/types";
 
 const KIND_ICON: Record<string, typeof Bot> = {
   agent: Bot,
@@ -414,6 +414,82 @@ function RunComparisonView({ comparison }: { comparison: RunComparison }) {
           </div>
         </div>
       )}
+
+      <SpanDiffTable rows={comparison.span_diffs ?? []} />
+    </div>
+  );
+}
+
+function SpanDiffTable({ rows }: { rows: SpanDiffRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="mt-4 rounded-xl border border-dashed border-zinc-800 px-3 py-6 text-center text-[11px] text-zinc-600">
+        暂无 Span 可对比（两侧均无追踪数据）
+      </div>
+    );
+  }
+  const matchLabel = { both: "双侧", only_a: "仅 A", only_b: "仅 B" } as const;
+  return (
+    <div className="mt-4">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-xs font-medium text-zinc-300">Span Diff</div>
+        <div className="text-[10px] text-zinc-600">按 |Δ耗时| 排序，最多 80 行 · 同名按出现序对齐</div>
+      </div>
+      <div className="overflow-hidden rounded-xl border border-zinc-800">
+        <table className="w-full text-[12px]">
+          <thead>
+            <tr className="bg-zinc-900/80 text-zinc-500">
+              <th className="px-3 py-2 text-left font-medium">名称</th>
+              <th className="px-3 py-2 text-left font-medium">类型</th>
+              <th className="px-3 py-2 text-left font-medium">对齐</th>
+              <th className="px-3 py-2 text-right font-medium">A 耗时</th>
+              <th className="px-3 py-2 text-right font-medium">B 耗时</th>
+              <th className="px-3 py-2 text-right font-medium">Δ耗时</th>
+              <th className="px-3 py-2 text-right font-medium">A tok</th>
+              <th className="px-3 py-2 text-right font-medium">B tok</th>
+              <th className="px-3 py-2 text-right font-medium">Δtok</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800/70">
+            {rows.map((row, i) => (
+              <tr key={`${row.name}-${row.kind}-${row.match}-${i}`} className="text-zinc-300">
+                <td className="max-w-[140px] truncate px-3 py-1.5 font-mono text-zinc-400" title={row.name}>
+                  {row.name}
+                </td>
+                <td className="px-3 py-1.5 text-zinc-500">{row.kind}</td>
+                <td className="px-3 py-1.5">
+                  <span
+                    className={
+                      "rounded px-1 py-0.5 text-[10px] " +
+                      (row.match === "both"
+                        ? "bg-zinc-800 text-zinc-400"
+                        : row.match === "only_a"
+                          ? "bg-amber-500/15 text-amber-300"
+                          : "bg-sky-500/15 text-sky-300")
+                    }
+                  >
+                    {matchLabel[row.match]}
+                  </span>
+                </td>
+                <td className="px-3 py-1.5 text-right font-mono">{fmtDuration(row.a?.duration_ms ?? null)}</td>
+                <td className="px-3 py-1.5 text-right font-mono">{fmtDuration(row.b?.duration_ms ?? null)}</td>
+                <td className="px-3 py-1.5 text-right font-mono">
+                  <DeltaCell a={row.a?.duration_ms ?? null} b={row.b?.duration_ms ?? null} format={fmtDuration} />
+                </td>
+                <td className="px-3 py-1.5 text-right font-mono">{row.a ? row.a.tokens.toLocaleString() : "-"}</td>
+                <td className="px-3 py-1.5 text-right font-mono">{row.b ? row.b.tokens.toLocaleString() : "-"}</td>
+                <td className="px-3 py-1.5 text-right font-mono">
+                  <DeltaCell
+                    a={row.a?.tokens ?? null}
+                    b={row.b?.tokens ?? null}
+                    format={(v) => (v == null ? "-" : v.toLocaleString())}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

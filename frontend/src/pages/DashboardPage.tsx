@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   Coins,
   Cpu,
   Database,
@@ -84,7 +85,7 @@ export default function DashboardPage() {
         api.get<DashboardStats>("/api/dashboard/stats"),
         api
           .get<EvalSuites>("/api/dashboard/evals")
-          .catch(() => ({ suites: {}, gates: {} }) as EvalSuites),
+          .catch(() => ({ suites: {}, gates: {}, alerts: [] }) as EvalSuites),
       ]);
       setStats(s);
       setEvals(e);
@@ -386,12 +387,32 @@ function LivePanel({
 
 function EvalPanel({ evals }: { evals: EvalSuites | null }) {
   const suites = Object.entries(evals?.suites ?? {}).filter(([, recs]) => recs.length > 0);
+  const alerts = evals?.alerts ?? [];
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
       <div className="mb-3 flex items-center gap-2 text-sm font-medium text-zinc-200">
         <Gauge size={15} className="text-sky-400" /> 评估回归
         <span className="text-[11px] font-normal text-zinc-500">检索/RAG/Agent 质量随每次评估的趋势</span>
       </div>
+      {alerts.length > 0 && (
+        <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-200">
+          <div className="mb-1 flex items-center gap-1.5 font-medium">
+            <AlertTriangle size={13} /> 质量门告警 · {alerts.length} 项未达标
+          </div>
+          <ul className="space-y-0.5 text-[11px] text-rose-300/90">
+            {alerts.map((a) => (
+              <li key={`${a.suite}-${a.metric}`}>
+                <span className="text-rose-200">{SUITE_LABEL[a.suite] ?? a.suite}</span>
+                {" · "}
+                <span className="font-mono">{a.metric}</span>
+                {" = "}
+                <span className="font-mono">{formatMetric(a.actual)}</span>
+                <span className="text-rose-400/80">（门限 ≥ {formatMetric(a.min)}）</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {suites.length === 0 ? (
         <div className="py-8 text-center text-xs text-zinc-600">
           尚无评估记录 —— 运行{" "}
@@ -503,6 +524,31 @@ function EvalSuiteCard({
           </span>
         ))}
       </div>
+      {(latest.checks?.length ?? 0) > 0 && (
+        <div className="mt-2 space-y-1 border-t border-zinc-800/80 pt-2">
+          <div className="text-[10px] text-zinc-500">最新评估 · 门禁明细</div>
+          {latest.checks.map((c) => (
+            <div key={c.metric} className="flex items-center justify-between text-[11px]">
+              <span className="font-mono text-zinc-400">{c.metric}</span>
+              <span
+                className={
+                  c.actual == null
+                    ? "text-zinc-600"
+                    : c.ok
+                      ? "font-mono text-emerald-400"
+                      : "font-mono text-rose-400"
+                }
+              >
+                {c.actual == null ? "无数据" : formatMetric(c.actual)}
+                <span className="text-zinc-600"> / ≥{formatMetric(c.min)}</span>
+                {c.actual != null && (
+                  <span className="ml-1.5 text-[10px]">{c.ok ? "达标" : "未达标"}</span>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

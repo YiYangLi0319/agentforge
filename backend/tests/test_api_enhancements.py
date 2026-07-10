@@ -175,8 +175,38 @@ async def test_dashboard_evals_grouped_by_suite(app, client, auth_headers):
     # 质量门：与 CI/CLI 同源，看板据此判定并画基线
     assert data["gates"]["retrieval"] == {"recall@5": 0.8, "mrr": 0.7}
     assert suites["retrieval"][0]["passed"] is True  # recall@5=0.8, mrr=0.7 恰好达标
+    assert isinstance(suites["retrieval"][0]["checks"], list)
+    assert {c["metric"] for c in suites["retrieval"][0]["checks"]} >= {"recall@5", "mrr"}
     # rag 记录缺少门限指标（只有 citation_integrity，非 *_rate）→ 无法判定
     assert suites["rag"][0]["passed"] is None
+    assert data["alerts"] == []
+
+
+async def test_dashboard_evals_alerts_on_failing_latest(app, client, auth_headers):
+    from datetime import UTC, datetime
+
+    from agentforge.db.models import EvalRecord
+
+    container = app.state.container
+    async with container.sessions() as db:
+        db.add(
+            EvalRecord(
+                suite="retrieval",
+                dataset="retrieval_zh.jsonl",
+                metrics={"recall@5": 0.5, "mrr": 0.4, "cases": 5},
+                detail=[],
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    data = (await client.get("/api/dashboard/evals", headers=auth_headers)).json()
+    assert data["suites"]["retrieval"][-1]["passed"] is False
+    metrics = {a["metric"] for a in data["alerts"]}
+    assert metrics == {"recall@5", "mrr"}
+    for alert in data["alerts"]:
+        assert alert["suite"] == "retrieval"
+        assert alert["actual"] < alert["min"]
 
 
 async def test_traces_compare_two_runs(client, auth_headers):
@@ -192,6 +222,10 @@ async def test_traces_compare_two_runs(client, auth_headers):
     first = data["runs"][0]
     assert "totals" in first and "by_kind" in first and "tools" in first
     assert first["totals"]["total_tokens"] >= 0
+    assert isinstance(data["span_diffs"], list)
+    for row in data["span_diffs"]:
+        assert row["match"] in {"both", "only_a", "only_b"}
+        assert "name" in row and "kind" in row
 
     # 同一条运行不允许对比
     bad = await client.get(f"/api/traces/compare?a={r1['id']}&b={r1['id']}", headers=auth_headers)

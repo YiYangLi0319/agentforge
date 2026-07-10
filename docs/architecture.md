@@ -75,7 +75,7 @@ sequenceDiagram
 订阅顺序：先挂事件总线队列 → 再读库重放（seq > after）→ 消费实时队列（seq 去重）
 ```
 
-配合 `id: seq` 响应头与 `?after=` 参数实现断线续传；前端保存最后 seq、指数退避重连并幂等去重，15s 心跳防止代理超时断连。Trace 页除单次运行的 Span 树/火焰图外，`/api/traces/compare` 支持两次运行并排对比（用量/耗时/成本、按 Span 类型聚合、工具调用分布），便于回归定位。
+配合 `id: seq` 响应头与 `?after=` 参数实现断线续传；前端保存最后 seq、指数退避重连并幂等去重，15s 心跳防止代理超时断连。Trace 页除单次运行的 Span 树/火焰图外，`/api/traces/compare` 支持两次运行并排对比（用量/耗时/成本、按 Span 类型聚合、工具调用分布），并返回按 `(name, kind)` 对齐的 Span Diff（同名多实例按出现序配对，仅一侧有的标 only_a/only_b，按 |Δ耗时| 截断），便于从总量下钻到具体 LLM/工具回归。
 
 ### 2.3 human-in-the-loop
 
@@ -120,7 +120,7 @@ sequenceDiagram
 - **安全护栏**（`core/guardrails/`）：`injection`（注入/越狱规则打分）+ `moderation`（内容审核）+ `pii`（脱敏）+ `engine`（编排裁决）。输入命中即拦截，输出统一脱敏；在 `services/chat.py` 接入，事件 `guardrail_triggered`。
 - **语义缓存**（`services/semantic_cache.py`）：作用域包含 user/agent/model/embedding/KB revision，时效或指代查询绕过；同轮查询向量供缓存和长期记忆复用，避免重复 Embedding。
 - **RAG 进阶**（`rag/enhance.py` + `rag/pipeline.py`）：查询改写 / HyDE（向量与 BM25 查询分离）/ 上下文压缩 / 父子分块（`retriever._expand_parents`）；由 `RagPipeline` 统一编排，检索工具与 Playground 共用。
-- **可观测**（`observability/metrics.py` + `observability/live.py` + `api/routers/dashboard.py`）：Prometheus 独立注册表（累计量）+ 进程内实时环形缓冲（近 N 分钟分桶曲线：运行/tokens/成本/缓存命中率/SSE 重连）。RunManager 与语义缓存在同一记录点同时写 Prometheus 与实时缓冲；前端 `reportClientMetric` 把 SSE 重连回传 `/dashboard/client-metric`，看板轮询 `/dashboard/live` 画活曲线。多副本以 Prometheus 为准。`/dashboard/evals` 把 CLI/CI 落库的 `eval_records` 按 suite 分组成质量回归趋势（检索/RAG/Agent），看板画成随每次评估的折线，把评估体系闭环到可观测。质量门在 `evals/gates.py` 单一事实源定义：CLI 未显式 `--fail-under` 时回退到默认门，看板据同一门限画基线并标注每次评估达标/未达标。
+- **可观测**（`observability/metrics.py` + `observability/live.py` + `api/routers/dashboard.py`）：Prometheus 独立注册表（累计量）+ 进程内实时环形缓冲（近 N 分钟分桶曲线：运行/tokens/成本/缓存命中率/SSE 重连）。RunManager 与语义缓存在同一记录点同时写 Prometheus 与实时缓冲；前端 `reportClientMetric` 把 SSE 重连回传 `/dashboard/client-metric`，看板轮询 `/dashboard/live` 画活曲线。多副本以 Prometheus 为准。`/dashboard/evals` 把 CLI/CI 落库的 `eval_records` 按 suite 分组成质量回归趋势（检索/RAG/Agent），看板画成随每次评估的折线，把评估体系闭环到可观测。质量门在 `evals/gates.py` 单一事实源定义：CLI 未显式 `--fail-under` 时回退到默认门，看板据同一门限画基线并标注每次评估达标/未达标；每条记录透出 `checks` 明细，顶层 `alerts` 汇总各 suite 最新未达标指标供顶栏告警。
 - **自定义工具**（`services/custom_tools.py`）：用户定义的 HTTP 接口 → 运行时构建为 Tool；仅在受信任环境显式开启，随对话按 user 动态加载。
 
 ## 6.6 生产发布边界

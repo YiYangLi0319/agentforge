@@ -133,6 +133,13 @@ export interface LiveSeries {
   };
 }
 
+export interface EvalGateCheck {
+  metric: string;
+  min: number;
+  actual: number | null;
+  ok: boolean;
+}
+
 export interface EvalRecordInfo {
   id: string;
   dataset: string;
@@ -141,11 +148,20 @@ export interface EvalRecordInfo {
   enabled_judge: boolean;
   created_at: string;
   passed: boolean | null;
+  checks: EvalGateCheck[];
+}
+
+export interface EvalAlert {
+  suite: string;
+  metric: string;
+  actual: number;
+  min: number;
 }
 
 export interface EvalSuites {
   suites: Record<string, EvalRecordInfo[]>;
   gates: Record<string, Record<string, number>>;
+  alerts: EvalAlert[];
 }
 
 export interface BuiltinTool {
@@ -330,6 +346,28 @@ export interface RunCompareItem {
 
 export interface RunComparison {
   runs: RunCompareItem[];
+  span_diffs: SpanDiffRow[];
+}
+
+export interface SpanDiffSide {
+  id: string;
+  status: string;
+  duration_ms: number | null;
+  tokens: number;
+  cost: number;
+}
+
+export interface SpanDiffRow {
+  name: string;
+  kind: string;
+  match: "both" | "only_a" | "only_b";
+  a: SpanDiffSide | null;
+  b: SpanDiffSide | null;
+  delta_duration_ms: number | null;
+  delta_tokens: number | null;
+  delta_cost: number | null;
+  delta_duration_pct: number | null;
+  delta_tokens_pct: number | null;
 }
 
 export interface SpanInfo {
