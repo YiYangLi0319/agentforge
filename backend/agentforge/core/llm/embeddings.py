@@ -68,7 +68,13 @@ class OpenAICompatEmbeddings(Embeddings):
                 raise LLMError(f"Embedding HTTP {resp.status_code}: {resp.text[:300]}")
             data = resp.json()
             items = sorted(data.get("data", []), key=lambda x: x.get("index", 0))
-            result.extend([item["embedding"] for item in items])
+            vectors = [item["embedding"] for item in items]
+            if len(vectors) != len(batch):
+                raise LLMError(f"Embedding 响应数量不匹配: expected={len(batch)}, actual={len(vectors)}")
+            expected_dim = self.dim or (len(vectors[0]) if vectors else 0)
+            if any(len(vector) != expected_dim for vector in vectors):
+                raise LLMError(f"Embedding 维度不匹配: expected={expected_dim}")
+            result.extend(vectors)
         if result and not self.dim:
             self.dim = len(result[0])
         return result

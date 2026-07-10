@@ -3,7 +3,7 @@
 import json
 
 from agentforge.agents.deep_research import run_deep_research
-from agentforge.core.llm.base import ChatResponse
+from agentforge.core.llm.base import ChatResponse, StreamDelta
 from agentforge.core.llm.mock import MockChatModel
 from agentforge.core.messages import Message, Usage
 from agentforge.core.tools.web_search import MockSearchProvider
@@ -52,6 +52,28 @@ class LoopJudge(MockChatModel):
             response_format=response_format,
             schema_hint=schema_hint,
         )
+
+
+class GroundedWriter(MockChatModel):
+    """写作阶段始终输出事实句均带有效编号的报告，便于隔离测试评审循环。"""
+
+    async def stream(self, messages, **kwargs):
+        prompt = "\n".join(message.content for message in messages)
+        if "资深研究报告撰写人" in prompt:
+            text = (
+                "# 测试报告\n\n## 摘要\n\n调研数据显示该主题已有明确进展 [1]。\n\n"
+                "## 分析\n\n根据来源，相关方案已形成可验证的实践路径 [1]。\n\n"
+                "## 结论与建议\n\n报告建议继续依据已核验资料推进 [1]。"
+            )
+            yield StreamDelta(text=text)
+            yield ChatResponse(
+                message=Message.assistant(text),
+                usage=Usage(prompt_tokens=10, completion_tokens=20),
+                model="mock",
+            )
+            return
+        async for event in super().stream(messages, **kwargs):
+            yield event
 
 
 async def test_deep_research_pipeline_offline(run_ctx):
@@ -103,7 +125,7 @@ async def test_research_iterative_revision_until_pass(run_ctx):
     events = [
         ev
         async for ev in run_deep_research(
-            "测试迭代修订", run_ctx, llm=MockChatModel(), judge_llm=judge, max_workers=1, max_revisions=3
+            "测试迭代修订", run_ctx, llm=GroundedWriter(), judge_llm=judge, max_workers=1, max_revisions=3
         )
     ]
     reviews = [e for e in events if e.type == "report_review"]

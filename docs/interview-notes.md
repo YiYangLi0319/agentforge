@@ -13,7 +13,7 @@
 - 实现中文友好混合检索：jieba 分词 + 自研 BM25（Okapi）与 pgvector 向量召回经 RRF(k=60) 融合，支持可插拔重排；实现 chunk 级引用溯源（答案 [n] 角标可回跳原文）；
 - 构建深度研究多 Agent 流水线：规划 → 并行搜索子 Agent → 证据交叉验证 → 流式报告生成 → 评审修订，并行子 Agent 事件经异步流合并实时上浮；
 - 建立评估体系：检索指标（Recall@K/MRR/nDCG）+ LLM-as-judge（忠实度/相关性/引用规范）+ 任务完成率，CLI 一键出报告并落库；
-- 工程化：65 个离线确定性测试（自研 Mock Provider 可按 JSON Schema 生成合法结构化输出）、mypy 全量类型、GitHub Actions CI、Docker Compose 一键部署、全链路 Trace（tokens/成本/耗时）。
+- 工程化：110+ 个离线确定性测试（自研 Mock Provider 可按 JSON Schema 生成合法结构化输出）、mypy 全量类型、带指标阈值的 GitHub Actions CI、Alembic 迁移、单镜像部署、全链路 Trace。
 
 **一句话定位**（自我介绍用）：“我做了一个不依赖框架、从协议层自研的企业级 Agent 平台，重点解决了生产落地最关心的四件事：可观测、可评估、可控（HITL）、可恢复。”
 
@@ -86,7 +86,7 @@ MCP（Model Context Protocol）是 Anthropic 提出的"Agent 与外部工具/数
 
 ### Q14：语义缓存怎么设计的？会不会返回过期/串味的答案？
 
-三个关键设计防串味：① **作用域隔离**——缓存键 = hash(agent_type + 排序后的 kb_ids)，不同知识库/模式的答案不互相命中；② **TTL** 过期不返回；③ **相似度阈值**（默认 0.93 余弦）——只有足够相似才命中。命中就跳过整个 Agent 执行，直接返回历史答案（还会走一遍输出 PII 脱敏）。带命中率统计，在看板可视化。降本效果对高频重复问法很明显。局限我也会讲：对时效性强的问题要调低 TTL 或按会话禁用。
+缓存键包含 **user + agent revision + KB revision + LLM + embedding model**，知识库或 Agent 变化会自然切换版本；TTL 和 0.93 余弦阈值控制复用。含“刚才/第二个/现在/最新”等上下文或时效词的查询直接绕过缓存。同一轮预先计算一次 query embedding，缓存查询、写入和长期记忆复用，避免三次重复请求。
 
 ### Q15：安全护栏具体防什么？
 
@@ -99,6 +99,18 @@ MCP（Model Context Protocol）是 Anthropic 提出的"Agent 与外部工具/数
 ### Q17：可观测性除了 Trace 还做了什么？
 
 加了聚合看板 + Prometheus。看板聚合近 N 天的运行数/成功率/token/成本/延迟趋势、工具使用 Top、缓存命中率、系统能力总览。同时暴露 `/api/dashboard/metrics` 的 Prometheus 端点（runs/tokens/cost/duration/tool_calls/cache/guardrail 等指标），可直接接 Prometheus + Grafana 做生产监控告警。这体现"从 demo 到生产"的意识。
+
+### Q18：你怎么证明引用可信，而不是模型随便写了一个 [1]？
+
+我把“编号存在”和“事实被证据支持”拆开。确定性 `CitationAudit` 检查无效编号、事实句引用覆盖率、来源是否读取过原文；前端只把真实存在的编号渲染成引用角标。来源注册表在服务端保留证据正文，研究评审模型会同时看到报告与证据，而不只是编号列表。确定性门失败会强制修订；达到上限仍失败则标记 `needs_review`，报告可查看但不能公开分享。这样不会把 LLM-as-judge 当唯一真相。
+
+### Q19：服务重启、数据库迁移和扩容是怎么处理的？
+
+生产镜像先跑 `alembic upgrade head`，应用进程不再 `create_all`；`readyz` 会校验数据库和 Alembic 版本；迁移链做过 `upgrade→downgrade→upgrade` 往返自测。崩溃遗留的 `running/awaiting_approval/resuming` 会在启动时收敛为 `interrupted`，chat 可基于 checkpoint 手动恢复并用 CAS 防重复（恢复启动若失败会把状态归还 `interrupted`，不会永久卡死），研究任务不自动重放副作用。当前事件总线和审批所有权是进程内实现，所以明确限制单副本单 worker，而不是声称已经支持水平扩展；后续要扩展会把任务所有权和事件总线一起迁到分布式队列。
+
+### Q20：SSRF 和缓存串味这些边界你怎么防？
+
+web_fetch 与自定义 HTTP 工具只放行全局可路由地址（`ip.is_global` 一条规则同时挡住私有段、环回、链路本地含云元数据 `169.254.169.254`、CGNAT `100.64/10`），并禁用自动重定向防止 3xx 绕过；彻底防 DNS 重绑定还需网络层出口白名单，这点我会诚实说明是部署侧职责。缓存方面：键含 user/agent/KB/模型多版本，时效或指代类查询正则绕过，且**注入了长期记忆的个性化回答不写入共享缓存**（会随用户画像演化而过期），引用不完整的回答也不缓存。引用审计还堵了一个隐患——要求引用时若报告根本没有来源会直接判失败，避免"无源报告"被误标 `succeeded` 并公开分享。
 
 ## 三、可以主动引导的展示点
 

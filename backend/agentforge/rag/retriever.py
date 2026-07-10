@@ -6,11 +6,11 @@ SQLite（轻量模式）下向量检索自动降级为进程内余弦计算，�
 import logging
 
 from pydantic import BaseModel
-from sqlalchemy import bindparam, func, select, text
+from sqlalchemy import and_, bindparam, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agentforge.core.llm.embeddings import Embeddings, cosine
-from agentforge.db.models import Chunk, Document
+from agentforge.db.models import Chunk, Document, KnowledgeBase
 from agentforge.rag.bm25 import BM25Index, rrf_fuse
 from agentforge.rag.rerank import Reranker
 from agentforge.rag.tokenize import tokenize
@@ -44,25 +44,31 @@ class HybridRetriever:
         self.sessions = sessions
         self.embeddings = embeddings
         self.reranker = reranker
-        self._bm25_cache: dict[str, tuple[int, BM25Index]] = {}
+        self._bm25_cache: dict[str, tuple[str, BM25Index]] = {}
 
-    async def _chunk_count(self, session: AsyncSession, kb_ids: list[str]) -> int:
-        result = await session.execute(
-            select(func.count(Chunk.id)).where(Chunk.kb_id.in_(kb_ids))
+    async def _kb_revision(self, session: AsyncSession, kb_ids: list[str]) -> str:
+        rows = (
+            await session.execute(
+                select(KnowledgeBase.id, KnowledgeBase.updated_at).where(
+                    KnowledgeBase.id.in_(kb_ids)
+                )
+            )
+        ).all()
+        return "|".join(
+            f"{kb_id}:{updated_at.isoformat()}" for kb_id, updated_at in sorted(rows)
         )
-        return int(result.scalar() or 0)
 
     async def _get_bm25(self, session: AsyncSession, kb_ids: list[str]) -> BM25Index:
         key = ",".join(sorted(kb_ids))
-        count = await self._chunk_count(session, kb_ids)
+        revision = await self._kb_revision(session, kb_ids)
         cached = self._bm25_cache.get(key)
-        if cached and cached[0] == count:
+        if cached and cached[0] == revision:
             return cached[1]
         rows = (
             await session.execute(select(Chunk.id, Chunk.terms).where(Chunk.kb_id.in_(kb_ids)))
         ).all()
         index = BM25Index([(r[0], r[1] or []) for r in rows])
-        self._bm25_cache[key] = (count, index)
+        self._bm25_cache[key] = (revision, index)
         return index
 
     async def _vector_search(
@@ -175,23 +181,36 @@ class HybridRetriever:
 
     async def _expand_parents(self, results: list[RetrievedChunk], window: int) -> None:
         """small-to-big：把命中的小块扩展为包含相邻块的更大上下文。"""
+        ranges: dict[str, tuple[int, int]] = {}
+        for result in results:
+            lo, hi = max(result.seq - window, 0), result.seq + window
+            previous = ranges.get(result.document_id)
+            ranges[result.document_id] = (
+                min(previous[0], lo) if previous else lo,
+                max(previous[1], hi) if previous else hi,
+            )
+        conditions = [
+            and_(Chunk.document_id == document_id, Chunk.seq >= lo, Chunk.seq <= hi)
+            for document_id, (lo, hi) in ranges.items()
+        ]
         async with self.sessions() as session:
-            for r in results:
-                lo, hi = max(r.seq - window, 0), r.seq + window
-                rows = (
-                    (
-                        await session.execute(
-                            select(Chunk.seq, Chunk.content)
-                            .where(
-                                Chunk.document_id == r.document_id,
-                                Chunk.seq >= lo,
-                                Chunk.seq <= hi,
-                            )
-                            .order_by(Chunk.seq)
-                        )
-                    )
-                    .all()
+            rows = (
+                await session.execute(
+                    select(Chunk.document_id, Chunk.seq, Chunk.content)
+                    .where(or_(*conditions))
+                    .order_by(Chunk.document_id, Chunk.seq)
                 )
-                if len(rows) > 1:
-                    r.content = "\n".join(row[1] for row in rows)
-                    r.expanded = True
+            ).all()
+        by_document: dict[str, list[tuple[int, str]]] = {}
+        for document_id, seq, content in rows:
+            by_document.setdefault(document_id, []).append((seq, content))
+        for result in results:
+            lo, hi = max(result.seq - window, 0), result.seq + window
+            parts = [
+                content
+                for seq, content in by_document.get(result.document_id, [])
+                if lo <= seq <= hi
+            ]
+            if len(parts) > 1:
+                result.content = "\n".join(parts)
+                result.expanded = True

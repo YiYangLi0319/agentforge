@@ -5,6 +5,7 @@ import pytest
 from agentforge.core.llm.mock import MockChatModel
 from agentforge.evals.judge import judge_answer, judge_task
 from agentforge.evals.metrics import aggregate, hit_rate_at_k, mrr, ndcg_at_k, recall_at_k
+from agentforge.evals.runner import threshold_failures
 
 
 def test_retrieval_metrics():
@@ -21,6 +22,13 @@ def test_retrieval_metrics():
     assert 0 < ndcg_at_k(["a", "b", "e"], {"b", "e"}, 3) < 1.0
     assert aggregate([1.0, 0.0]) == 0.5
     assert aggregate([]) == 0.0
+
+
+def test_eval_threshold_gate():
+    result = {"metrics": {"recall@5": 0.9, "mrr": 0.6}}
+    assert threshold_failures(result, ["recall@5=0.8"]) == []
+    assert threshold_failures(result, ["mrr=0.7"]) == ["mrr=0.6 低于阈值 0.7"]
+    assert "不存在" in threshold_failures(result, ["citation=0.8"])[0]
 
 
 async def test_judge_answer_structured():

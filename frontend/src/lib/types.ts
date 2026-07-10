@@ -10,6 +10,7 @@ export interface Source {
   document_id?: string;
   filename?: string;
   heading?: string;
+  verified?: boolean;
 }
 
 export interface ToolCallInfo {
@@ -52,6 +53,10 @@ export interface AgentEvent {
   passed?: boolean;
   scores?: Record<string, number>;
   feedback?: string;
+  audit?: Record<string, unknown>;
+  phase?: string;
+  completed_tasks?: number;
+  total_tasks?: number;
   // finish
   output?: { text?: string; report?: string; sources?: Source[]; [k: string]: unknown };
   cost?: number;
@@ -199,7 +204,8 @@ export interface ResearchPlan {
 export interface ChatSessionInfo {
   id: string;
   title: string;
-  agent_type: "assistant" | "team";
+  agent_type: "assistant" | "team" | "custom";
+  custom_agent_id?: string | null;
   kb_ids: string[];
   created_at: string;
   updated_at: string;

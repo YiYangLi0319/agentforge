@@ -13,9 +13,6 @@ from agentforge.rag.tokenize import tokenize
 
 logger = logging.getLogger(__name__)
 
-EMBED_BATCH = 16
-
-
 async def ingest_document(
     sessions: async_sessionmaker[AsyncSession],
     embeddings: Embeddings,
@@ -35,10 +32,8 @@ async def ingest_document(
         if not drafts:
             raise ValueError("解析结果为空（文档无有效文本内容）")
 
-        vectors: list[list[float]] = []
-        for i in range(0, len(drafts), EMBED_BATCH):
-            batch = [d.content for d in drafts[i : i + EMBED_BATCH]]
-            vectors.extend(await embeddings.embed(batch))
+        # 分批策略由 Embeddings Provider 统一负责，避免业务层与 Provider 双重切成固定 16 条。
+        vectors = await embeddings.embed([draft.content for draft in drafts])
 
         async with sessions() as session:
             doc = (

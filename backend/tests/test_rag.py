@@ -8,7 +8,13 @@ from agentforge.db.base import Base, build_engine
 from agentforge.db.models import Chunk, Document, KnowledgeBase, User
 from agentforge.rag.bm25 import BM25Index, rrf_fuse
 from agentforge.rag.chunking import chunk_sections
-from agentforge.rag.citations import cited_sources, extract_cited_ids, format_context_with_citations
+from agentforge.rag.citations import (
+    audit_citations,
+    cited_sources,
+    extract_cited_ids,
+    format_context_with_citations,
+    sanitize_invalid_citations,
+)
 from agentforge.rag.parsers import Section, parse_document, split_markdown_sections
 from agentforge.rag.retriever import HybridRetriever
 from agentforge.rag.tokenize import tokenize
@@ -143,3 +149,16 @@ def test_citation_registry_and_extraction():
     assert extract_cited_ids(answer) == {1, 3}
     used = cited_sources(answer, state)
     assert len(used) == 1 and used[0]["id"] == 1
+    audit = audit_citations(answer, state["sources"], require_citations=True)
+    assert audit.invalid_ids == [3] and not audit.passed
+    cleaned = sanitize_invalid_citations(answer, state["sources"])
+    assert "[无效来源:3]" in cleaned and "[3]" not in cleaned
+
+
+def test_audit_requires_sources_when_citations_required():
+    # 无任何来源时，要求引用的报告不能判为通过（否则会被误标 succeeded 并可公开分享）
+    audit = audit_citations("这是一段没有任何来源支撑的结论。", [], require_citations=True)
+    assert not audit.passed and audit.issues
+    # 不要求引用时，纯说明性文本可以通过
+    relaxed = audit_citations("这是一段自由回答。", [], require_citations=False)
+    assert relaxed.passed

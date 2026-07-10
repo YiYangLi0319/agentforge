@@ -4,13 +4,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentforge.api.app import Container
 from agentforge.api.deps import get_container, get_current_user, get_db
-from agentforge.db.models import Chunk, Document, KnowledgeBase, User
+from agentforge.db.models import Chunk, Document, KnowledgeBase, User, utcnow
 from agentforge.rag.parsers import SUPPORTED_EXTENSIONS
+from agentforge.rag.pipeline import RagOptions, RagPipeline
 from agentforge.services.ingestion import ingest_document
 
 router = APIRouter()
@@ -195,6 +196,9 @@ async def delete_document(
         raise HTTPException(status_code=404, detail="文档不存在")
     await db.execute(delete(Chunk).where(Chunk.document_id == doc_id))
     await db.delete(doc)
+    await db.execute(
+        update(KnowledgeBase).where(KnowledgeBase.id == kb_id).values(updated_at=utcnow())
+    )
     await db.commit()
 
 
@@ -214,9 +218,22 @@ async def search_kb(
 ) -> dict:
     """检索 Playground：返回混合检索的分数拆解，用于调试与演示。"""
     await _own_kb(db, user, kb_id)
-    results = await container.retriever.search([kb_id], body.query, top_k=body.top_k, mode=body.mode)
+    pipeline = RagPipeline(container.retriever, container.llm)
+    results, trace = await pipeline.retrieve(
+        [kb_id],
+        body.query,
+        top_k=body.top_k,
+        opts=RagOptions(
+            mode=body.mode,
+            query_rewrite=container.settings.rag_query_rewrite,
+            hyde=container.settings.rag_hyde,
+            compression=container.settings.rag_compression,
+            parent_child=container.settings.rag_parent_child,
+        ),
+    )
     return {
         "query": body.query,
         "mode": body.mode,
+        "enhance": trace.get("steps", []),
         "results": [r.model_dump() for r in results],
     }

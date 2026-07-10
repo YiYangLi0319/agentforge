@@ -1,6 +1,7 @@
-"""Web 搜索工具：Tavily(配 Key) > DuckDuckGo(免 Key) > Mock(离线兜底) 三级降级。"""
+"""Web 搜索工具：生产链路 Tavily > DuckDuckGo；Mock 仅在显式演示模式启用。"""
 
 import asyncio
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 
@@ -77,10 +78,11 @@ class MockSearchProvider(SearchProvider):
     name = "mock"
 
     async def search(self, query: str, max_results: int = 5) -> list[SearchHit]:
+        query_id = hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]
         return [
             SearchHit(
                 title=f"关于「{query[:30]}」的资料 {i + 1}",
-                url=f"https://example.com/mock/{abs(hash(query)) % 10000}/{i + 1}",
+                url=f"https://example.com/mock/{query_id}/{i + 1}",
                 snippet=f"这是离线演示模式下关于「{query[:40]}」的模拟搜索结果摘要（第 {i + 1} 条）。"
                 f"配置 TAVILY_API_KEY 或联网后可获得真实结果。",
             )
@@ -89,7 +91,7 @@ class MockSearchProvider(SearchProvider):
 
 
 class FallbackSearchProvider(SearchProvider):
-    """按优先级依次尝试，全部失败则用 Mock 兜底，保证工具永不抛错。"""
+    """按优先级依次尝试；全部失败返回空结果，绝不把模拟来源冒充真实证据。"""
 
     name = "auto"
 
@@ -104,7 +106,7 @@ class FallbackSearchProvider(SearchProvider):
                     return hits
             except Exception as e:  # noqa: BLE001
                 logger.warning("搜索提供方 %s 失败，尝试下一个: %s", p.name, e)
-        return await MockSearchProvider().search(query, max_results)
+        return []
 
 
 def build_search_provider(tavily_api_key: str = "", mode: str = "auto") -> SearchProvider:
@@ -139,6 +141,8 @@ async def web_search(query: str, max_results: int = 5, ctx: ToolContext | None =
         max_results: 返回结果条数，默认 5，最大 10
     """
     assert ctx is not None
-    provider: SearchProvider = ctx.services.get("search") or MockSearchProvider()
+    provider: SearchProvider | None = ctx.services.get("search")
+    if provider is None:
+        return ToolResult.error("搜索服务未初始化")
     hits = await provider.search(query, min(max(max_results, 1), 10))
     return ToolResult(content=format_hits(hits, ctx.state), data={"count": len(hits)})

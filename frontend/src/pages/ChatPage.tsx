@@ -1,8 +1,11 @@
 import {
   Bot,
   CircleStop,
+  Download,
   MessageSquarePlus,
   MessagesSquare,
+  Pencil,
+  Search,
   SendHorizonal,
   ShieldQuestion,
   Sparkles,
@@ -33,6 +36,11 @@ interface PendingApproval {
   arguments: Record<string, unknown>;
 }
 
+interface ActiveRun {
+  id: string;
+  status: string;
+}
+
 export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -51,14 +59,20 @@ export default function ChatPage() {
   const [newAgentType, setNewAgentType] = useState<"assistant" | "team" | "custom">("assistant");
   const [customAgents, setCustomAgents] = useState<CustomAgentInfo[]>([]);
   const [newCustomAgentId, setNewCustomAgentId] = useState<string>("");
+  const [sessionQuery, setSessionQuery] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [pageError, setPageError] = useState("");
+  const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
 
   const abortRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const runIdRef = useRef<string | null>(null);
   const activeSession = sessions.find((s) => s.id === activeId);
 
-  const loadSessions = useCallback(async () => {
-    const list = await api.get<ChatSessionInfo[]>("/api/chat/sessions");
+  const loadSessions = useCallback(async (search = "") => {
+    const suffix = search.trim() ? `?q=${encodeURIComponent(search.trim())}` : "";
+    const list = await api.get<ChatSessionInfo[]>(`/api/chat/sessions${suffix}`);
     setSessions(list);
     return list;
   }, []);
@@ -73,16 +87,37 @@ export default function ChatPage() {
   }, [loadSessions]);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      loadSessions(sessionQuery).catch((error) =>
+        setPageError(error instanceof Error ? error.message : "加载会话失败"),
+      );
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [loadSessions, sessionQuery]);
+
+  useEffect(() => {
     if (!activeId) return;
     abortRef.current?.();
     setStreamText("");
     setTimeline([]);
     setApprovals([]);
     setRunning(false);
+    setActiveRun(null);
+    setRunId(null);
+    runIdRef.current = null;
     api
-      .get<{ messages: ChatMessageInfo[] }>(`/api/chat/sessions/${activeId}`)
-      .then((d) => setMessages(d.messages))
-      .catch(() => setMessages([]));
+      .get<{ messages: ChatMessageInfo[]; active_run: ActiveRun | null }>(
+        `/api/chat/sessions/${activeId}`,
+      )
+      .then((d) => {
+        setMessages(d.messages);
+        setActiveRun(d.active_run);
+        setPageError("");
+      })
+      .catch((error) => {
+        setMessages([]);
+        setPageError(error instanceof Error ? error.message : "加载消息失败");
+      });
   }, [activeId]);
 
   useEffect(() => {
@@ -113,17 +148,21 @@ export default function ChatPage() {
       case "run_finished": {
         const text = ev.output?.text ?? "";
         const sources = ev.output?.sources ?? [];
-        setMessages((msgs) => [
-          ...msgs,
-          {
-            id: `local-${Date.now()}`,
-            role: "assistant",
-            content: String(text),
-            sources,
-            run_id: runIdRef.current ?? undefined,
-            created_at: new Date().toISOString(),
-          },
-        ]);
+        setMessages((msgs) =>
+          runIdRef.current && msgs.some((message) => message.run_id === runIdRef.current)
+            ? msgs
+            : [
+                ...msgs,
+                {
+                  id: `local-${Date.now()}`,
+                  role: "assistant",
+                  content: String(text),
+                  sources,
+                  run_id: runIdRef.current ?? undefined,
+                  created_at: new Date().toISOString(),
+                },
+              ],
+        );
         setStreamText("");
         setStreamSources([]);
         setRunning(false);
@@ -156,14 +195,30 @@ export default function ChatPage() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!activeRun) return;
+    setRunId(activeRun.id);
+    runIdRef.current = activeRun.id;
+    setRunning(true);
+    abortRef.current = streamRunEvents(activeRun.id, {
+      onEvent: handleEvent,
+      onError: () => {
+        setRunning(false);
+        setPageError("事件流恢复失败，请刷新会话查看最终结果");
+      },
+    });
+    return () => abortRef.current?.();
+  }, [activeRun, handleEvent]);
+
   const send = async () => {
     const content = input.trim();
     if (!content || running || !activeId) return;
+    const optimisticId = `u-${Date.now()}`;
     setInput("");
     setMessages((m) => [
       ...m,
       {
-        id: `u-${Date.now()}`,
+        id: optimisticId,
         role: "user",
         content,
         sources: [],
@@ -188,7 +243,7 @@ export default function ChatPage() {
     } catch (e) {
       setRunning(false);
       setMessages((m) => [
-        ...m,
+        ...m.filter((message) => message.id !== optimisticId),
         {
           id: `err-${Date.now()}`,
           role: "assistant",
@@ -218,61 +273,180 @@ export default function ChatPage() {
     });
     setShowCreate(false);
     setNewKbIds([]);
-    await loadSessions();
+    setSessionQuery("");
+    await loadSessions("");
     setActiveId(s.id);
   };
 
   const removeSession = async (id: string) => {
-    await api.delete(`/api/chat/sessions/${id}`);
-    const list = await loadSessions();
-    if (activeId === id) setActiveId(list[0]?.id ?? null);
+    const target = sessions.find((session) => session.id === id);
+    if (!window.confirm(`确认删除会话“${target?.title ?? "未命名会话"}”？此操作不可撤销。`)) return;
+    try {
+      await api.delete(`/api/chat/sessions/${id}`);
+      const list = await loadSessions(sessionQuery);
+      if (activeId === id) setActiveId(list[0]?.id ?? null);
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "删除失败");
+    }
+  };
+
+  const saveTitle = async (id: string) => {
+    const title = editingTitle.trim();
+    setEditingId(null);
+    if (!title) return;
+    try {
+      await api.patch(`/api/chat/sessions/${id}`, { title });
+      await loadSessions(sessionQuery);
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "重命名失败");
+    }
+  };
+
+  const exportSession = async (id: string) => {
+    try {
+      const { blob, filename } = await api.download(`/api/chat/sessions/${id}/export`);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : "导出失败");
+    }
   };
 
   return (
     <div className="flex h-full">
       {/* 会话列表 */}
-      <div className="flex w-60 shrink-0 flex-col border-r border-zinc-800/80">
-        <div className="p-3">
+      <div className="hidden w-60 shrink-0 flex-col border-r border-zinc-800/80 md:flex">
+        <div className="space-y-2 p-3">
           <Button onClick={() => setShowCreate(true)} className="w-full" size="sm">
             <MessageSquarePlus size={14} /> 新建对话
           </Button>
+          <label className="relative block">
+            <span className="sr-only">搜索会话</span>
+            <Search
+              size={13}
+              className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-zinc-600"
+            />
+            <input
+              value={sessionQuery}
+              onChange={(event) => setSessionQuery(event.target.value)}
+              placeholder="搜索会话…"
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-900 py-2 pr-2 pl-8 text-xs text-zinc-300 placeholder:text-zinc-600 focus:border-indigo-500 focus:outline-none"
+            />
+          </label>
         </div>
         <div className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
           {sessions.map((s) => (
             <div
               key={s.id}
-              onClick={() => setActiveId(s.id)}
               className={
-                "group flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] " +
+                "group flex items-center gap-1 rounded-lg px-1.5 py-1 text-[13px] " +
                 (s.id === activeId ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-800/50")
               }
             >
-              {s.agent_type === "team" ? (
-                <Users size={13} className="shrink-0 text-violet-400" />
+              {editingId === s.id ? (
+                <div className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1">
+                  {s.agent_type === "team" ? (
+                    <Users size={13} className="shrink-0 text-violet-400" />
+                  ) : (
+                    <Bot size={13} className="shrink-0 text-indigo-400" />
+                  )}
+                  <input
+                    autoFocus
+                    value={editingTitle}
+                    onChange={(event) => setEditingTitle(event.target.value)}
+                    onBlur={() => saveTitle(s.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void saveTitle(s.id);
+                      if (event.key === "Escape") setEditingId(null);
+                    }}
+                    className="min-w-0 flex-1 rounded border border-indigo-500 bg-zinc-950 px-1.5 py-0.5 text-xs outline-none"
+                    aria-label="会话标题"
+                  />
+                </div>
               ) : (
-                <Bot size={13} className="shrink-0 text-indigo-400" />
+                <button
+                  type="button"
+                  onClick={() => setActiveId(s.id)}
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left"
+                >
+                  {s.agent_type === "team" ? (
+                    <Users size={13} className="shrink-0 text-violet-400" />
+                  ) : (
+                    <Bot size={13} className="shrink-0 text-indigo-400" />
+                  )}
+                  <span className="flex-1 truncate">{s.title}</span>
+                  {s.kb_ids.length > 0 && <Badge tone="green">库</Badge>}
+                </button>
               )}
-              <span className="flex-1 truncate">{s.title}</span>
-              {s.kb_ids.length > 0 && <Badge tone="green">库</Badge>}
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeSession(s.id);
+                type="button"
+                onClick={() => {
+                  setEditingId(s.id);
+                  setEditingTitle(s.title);
                 }}
-                className="hidden rounded p-0.5 text-zinc-500 hover:text-rose-400 group-hover:block"
+                aria-label={`重命名 ${s.title}`}
+                className="rounded p-1 text-zinc-600 opacity-0 hover:text-indigo-300 focus:opacity-100 group-hover:opacity-100"
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                type="button"
+                onClick={() => exportSession(s.id)}
+                aria-label={`导出 ${s.title}`}
+                className="rounded p-1 text-zinc-600 opacity-0 hover:text-emerald-300 focus:opacity-100 group-hover:opacity-100"
+              >
+                <Download size={12} />
+              </button>
+              <button
+                type="button"
+                onClick={() => removeSession(s.id)}
+                aria-label={`删除 ${s.title}`}
+                className="rounded p-1 text-zinc-600 opacity-0 hover:text-rose-400 focus:opacity-100 group-hover:opacity-100"
               >
                 <Trash2 size={12} />
               </button>
             </div>
           ))}
+          {sessions.length === 0 && (
+            <div className="px-3 py-6 text-center text-xs text-zinc-600">
+              {sessionQuery ? "没有匹配的会话" : "暂无会话"}
+            </div>
+          )}
         </div>
       </div>
 
       {/* 消息区 */}
       <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex items-center gap-2 border-b border-zinc-800/80 p-2 md:hidden">
+          <select
+            value={activeId ?? ""}
+            onChange={(event) => setActiveId(event.target.value || null)}
+            aria-label="选择会话"
+            className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-300"
+          >
+            <option value="">选择会话</option>
+            {sessions.map((session) => (
+              <option key={session.id} value={session.id}>
+                {session.title}
+              </option>
+            ))}
+          </select>
+          <Button size="sm" onClick={() => setShowCreate(true)} aria-label="新建对话">
+            <MessageSquarePlus size={14} />
+          </Button>
+        </div>
+        {pageError && (
+          <div role="alert" className="border-b border-rose-500/30 bg-rose-500/10 px-4 py-2 text-xs text-rose-300">
+            {pageError}
+          </div>
+        )}
         {activeId ? (
           <>
-            <div className="flex-1 overflow-y-auto px-6 py-5">
+            <div className="flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-5">
               <div className="mx-auto max-w-3xl space-y-5">
                 {messages.map((m) => (
                   <MessageBubble key={m.id} msg={m} />
@@ -292,9 +466,13 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <div className="border-t border-zinc-800/80 px-6 py-4">
+            <div className="border-t border-zinc-800/80 px-3 py-3 sm:px-6 sm:py-4">
               <div className="mx-auto flex max-w-3xl items-end gap-2">
+                <label htmlFor="chat-input" className="sr-only">
+                  输入消息
+                </label>
                 <textarea
+                  id="chat-input"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -333,7 +511,7 @@ export default function ChatPage() {
       </div>
 
       {/* 执行过程面板 */}
-      <div className="flex w-80 shrink-0 flex-col border-l border-zinc-800/80">
+      <div className="hidden w-80 shrink-0 flex-col border-l border-zinc-800/80 xl:flex">
         <div className="border-b border-zinc-800/80 px-4 py-3 text-xs font-medium tracking-wide text-zinc-400">
           执行过程
           {activeSession?.agent_type === "team" && (
@@ -373,8 +551,16 @@ export default function ChatPage() {
       {/* 新建对话弹窗 */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowCreate(false)}>
-          <div className="w-[420px] rounded-2xl border border-zinc-800 bg-zinc-900 p-5" onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-4 text-sm font-semibold text-zinc-100">新建对话</h3>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-chat-title"
+            className="mx-3 w-full max-w-[420px] rounded-2xl border border-zinc-800 bg-zinc-900 p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="create-chat-title" className="mb-4 text-sm font-semibold text-zinc-100">
+              新建对话
+            </h3>
             <div className="mb-3">
               <div className="mb-1.5 text-xs text-zinc-500">Agent 模式</div>
               <div className="grid grid-cols-3 gap-2">

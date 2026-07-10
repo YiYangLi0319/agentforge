@@ -20,7 +20,7 @@ from agentforge.core.events import INTERNAL_EVENTS, dump_event
 from agentforge.core.messages import ToolCall
 from agentforge.core.runtime import RunContext
 from agentforge.core.tools.base import Tool
-from agentforge.db.models import Run, RunEvent, Span
+from agentforge.db.models import ResearchReport, Run, RunEvent, Span
 from agentforge.services.bus import CLOSE_SENTINEL, EventBus
 
 logger = logging.getLogger(__name__)
@@ -33,12 +33,28 @@ APPROVAL_TIMEOUT = 600.0
 RunFactory = Callable[[RunContext], AsyncIterator]
 
 
+class RunLimitExceeded(RuntimeError):
+    """达到单实例运行并发上限。"""
+
+
 class RunManager:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        max_concurrent: int = 8,
+        max_per_user: int = 2,
+        max_per_session: int = 1,
+    ):
         self.sessions = sessions
         self.bus = EventBus()
         self._tasks: dict[str, asyncio.Task] = {}
         self._approvals: dict[tuple[str, str], asyncio.Future] = {}
+        self._owners: dict[str, tuple[str, str | None]] = {}
+        self._start_lock = asyncio.Lock()
+        self.max_concurrent = max_concurrent
+        self.max_per_user = max_per_user
+        self.max_per_session = max_per_session
 
     # ---------- 启动与驱动 ----------
 
@@ -52,21 +68,44 @@ class RunManager:
         factory: RunFactory,
         session_id: str | None = None,
     ) -> str:
-        async with self.sessions() as session:
-            run = Run(user_id=user_id, kind=kind, status="running", input=input, session_id=session_id)
-            session.add(run)
-            await session.commit()
-            run_id = run.id
+        async with self._start_lock:
+            self._prune_finished_tasks()
+            self._check_capacity(user_id, session_id)
+            async with self.sessions() as session:
+                run = Run(user_id=user_id, kind=kind, status="running", input=input, session_id=session_id)
+                session.add(run)
+                await session.commit()
+                run_id = run.id
 
-        ctx.run_id = run_id
-        ctx.user_id = user_id
-        ctx.session_id = session_id
-        ctx.state["kind"] = kind
-        ctx.approval_gate = self._make_approval_gate(run_id)
+            ctx.run_id = run_id
+            ctx.user_id = user_id
+            ctx.session_id = session_id
+            ctx.state["kind"] = kind
+            ctx.approval_gate = self._make_approval_gate(run_id)
 
-        task = asyncio.create_task(self._drive(run_id, factory, ctx), name=f"run-{run_id}")
-        self._tasks[run_id] = task
-        return run_id
+            self._owners[run_id] = (user_id, session_id)
+            task = asyncio.create_task(self._drive(run_id, factory, ctx), name=f"run-{run_id}")
+            self._tasks[run_id] = task
+            return run_id
+
+    def _prune_finished_tasks(self) -> None:
+        for run_id, task in list(self._tasks.items()):
+            if task.done():
+                self._tasks.pop(run_id, None)
+                self._owners.pop(run_id, None)
+
+    def _check_capacity(self, user_id: str, session_id: str | None) -> None:
+        owners = list(self._owners.values())
+        if self.max_concurrent > 0 and len(owners) >= self.max_concurrent:
+            raise RunLimitExceeded("系统运行任务已达上限，请稍后重试")
+        if self.max_per_user > 0 and sum(uid == user_id for uid, _ in owners) >= self.max_per_user:
+            raise RunLimitExceeded("你的并发任务已达上限，请等待已有任务完成")
+        if (
+            session_id
+            and self.max_per_session > 0
+            and sum(sid == session_id for _, sid in owners) >= self.max_per_session
+        ):
+            raise RunLimitExceeded("该会话已有任务正在运行，请等待完成或先取消")
 
     async def _drive(self, run_id: str, factory: RunFactory, ctx: RunContext) -> None:
         seq = 0
@@ -97,54 +136,122 @@ class RunManager:
             status = "cancelled"
             seq += 1
             payload = {"seq": seq, "type": "run_cancelled", "ts": datetime.now(UTC).timestamp()}
-            await self._persist_event(run_id, seq, "run_cancelled", payload)
-            self.bus.publish(run_id, payload)
+            try:
+                await self._persist_event(run_id, seq, "run_cancelled", payload)
+                self.bus.publish(run_id, payload)
+            except Exception:  # noqa: BLE001 数据库故障不能阻止本地任务清理
+                logger.exception("Run %s 取消事件持久化失败", run_id)
         except Exception as e:  # noqa: BLE001 工厂函数异常兜底
             logger.exception("Run %s 执行异常", run_id)
             status, error = "failed", f"{type(e).__name__}: {e}"
             seq += 1
             payload = {"seq": seq, "type": "run_failed", "error": error, "ts": datetime.now(UTC).timestamp()}
-            await self._persist_event(run_id, seq, "run_failed", payload)
-            self.bus.publish(run_id, payload)
+            try:
+                await self._persist_event(run_id, seq, "run_failed", payload)
+                self.bus.publish(run_id, payload)
+            except Exception:  # noqa: BLE001 数据库故障不能阻止本地任务清理
+                logger.exception("Run %s 失败事件持久化失败", run_id)
         finally:
             usage_total, traced_cost = ctx.tracer.totals()
-            self._record_metrics(ctx, status, prompt_tokens, completion_tokens, cost, usage_total, traced_cost)
-            async with self.sessions() as session:
+            try:
+                self._record_metrics(ctx, status, prompt_tokens, completion_tokens, cost, usage_total, traced_cost)
+                await self._finalize_run(
+                    run_id,
+                    status=status,
+                    output=output,
+                    error=error,
+                    prompt_tokens=prompt_tokens or usage_total.prompt_tokens,
+                    completion_tokens=completion_tokens or usage_total.completion_tokens,
+                    cost=cost or traced_cost,
+                    ctx=ctx,
+                )
+            except Exception:  # noqa: BLE001 即使数据库不可用也必须关闭 SSE 并释放并发名额
+                logger.exception("Run %s 收尾落库失败", run_id)
+            finally:
+                self.bus.close(run_id)
+                self._tasks.pop(run_id, None)
+                self._owners.pop(run_id, None)
+
+    async def _finalize_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        output: dict,
+        error: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost: float,
+        ctx: RunContext,
+    ) -> None:
+        async with self.sessions() as session:
+            await session.execute(
+                update(Run)
+                .where(Run.id == run_id)
+                .values(
+                    status=status,
+                    output=output,
+                    error=error,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost=cost,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            if ctx.state.get("kind") == "research" and status != "succeeded":
                 await session.execute(
-                    update(Run)
-                    .where(Run.id == run_id)
-                    .values(
-                        status=status,
-                        output=output,
-                        error=error,
-                        prompt_tokens=prompt_tokens or usage_total.prompt_tokens,
-                        completion_tokens=completion_tokens or usage_total.completion_tokens,
-                        cost=cost or traced_cost,
-                        finished_at=datetime.now(UTC),
+                    update(ResearchReport)
+                    .where(ResearchReport.run_id == run_id)
+                    .values(status=status, review={"error": error or f"研究任务已{status}"})
+                )
+            for span in ctx.tracer.spans:
+                session.add(
+                    Span(
+                        id=span.id,
+                        run_id=run_id,
+                        parent_id=span.parent_id,
+                        name=span.name,
+                        kind=span.kind,
+                        status=span.status,
+                        input=_safe_json(span.input),
+                        output=_safe_json(span.output),
+                        error=span.error,
+                        prompt_tokens=span.prompt_tokens,
+                        completion_tokens=span.completion_tokens,
+                        cost=span.cost,
+                        started_at=datetime.fromtimestamp(span.started_at, UTC),
+                        ended_at=datetime.fromtimestamp(span.ended_at, UTC) if span.ended_at else None,
                     )
                 )
-                for span in ctx.tracer.spans:
-                    session.add(
-                        Span(
-                            id=span.id,
-                            run_id=run_id,
-                            parent_id=span.parent_id,
-                            name=span.name,
-                            kind=span.kind,
-                            status=span.status,
-                            input=_safe_json(span.input),
-                            output=_safe_json(span.output),
-                            error=span.error,
-                            prompt_tokens=span.prompt_tokens,
-                            completion_tokens=span.completion_tokens,
-                            cost=span.cost,
-                            started_at=datetime.fromtimestamp(span.started_at, UTC),
-                            ended_at=datetime.fromtimestamp(span.ended_at, UTC) if span.ended_at else None,
-                        )
+            await session.commit()
+
+    async def recover_interrupted(self) -> int:
+        """单实例启动时收敛上次崩溃遗留状态；不自动重放可能有副作用的工具。"""
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(Run).where(
+                        Run.status.in_(("running", "awaiting_approval", "pending", "resuming"))
                     )
-                await session.commit()
-            self.bus.close(run_id)
-            self._tasks.pop(run_id, None)
+                )
+            ).scalars().all()
+            if not rows:
+                return 0
+            run_ids = [row.id for row in rows]
+            reason = "服务重启导致任务中断，可从 checkpoint 手动恢复 chat 任务"
+            await session.execute(
+                update(Run)
+                .where(Run.id.in_(run_ids))
+                .values(status="interrupted", error=reason, finished_at=datetime.now(UTC))
+            )
+            await session.execute(
+                update(ResearchReport)
+                .where(ResearchReport.run_id.in_(run_ids), ResearchReport.status == "running")
+                .values(status="interrupted", review={"error": reason})
+            )
+            await session.commit()
+        logger.warning("已将 %s 个遗留运行标记为 interrupted", len(run_ids))
+        return len(run_ids)
 
     def _record_metrics(self, ctx, status, ptok, ctok, cost, usage_total, traced_cost) -> None:
         from agentforge.observability import metrics
@@ -198,7 +305,7 @@ class RunManager:
                 last = max(last, row.seq)
                 yield row.payload
 
-            terminal_statuses = {"succeeded", "failed", "cancelled"}
+            terminal_statuses = {"succeeded", "failed", "cancelled", "interrupted", "resumed"}
             if run is not None and run.status in terminal_statuses and run_id not in self._tasks:
                 return
 

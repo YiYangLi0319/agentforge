@@ -66,7 +66,7 @@ sequenceDiagram
 ### 2.1 事件溯源 + Checkpoint
 
 - 每个 Run 的事件按 `seq` 递增持久化（`run_events` 表）；`llm_delta` 等瞬态事件只推送不落库（全量文本由 `assistant_message`/`report_draft` 兜底），避免 DB 膨胀；
-- Agent 每步产出 `Checkpoint`（完整消息快照）写入 `runs.checkpoint`。进程重启后 `POST /api/runs/{id}/resume` 可恢复：若快照末尾存在未完成的 tool_calls，补"系统重启未执行"占位结果后继续循环，保证消息序列合法。
+- Agent 每步产出 `Checkpoint`（完整消息快照）写入 `runs.checkpoint`。启动时遗留在途任务统一收敛为 `interrupted`；仅 chat 允许用户手动恢复，且用数据库 CAS 防止并发重复恢复。有副作用的研究工具不会被自动重放。
 
 ### 2.2 SSE 不丢不重
 
@@ -74,7 +74,7 @@ sequenceDiagram
 订阅顺序：先挂事件总线队列 → 再读库重放（seq > after）→ 消费实时队列（seq 去重）
 ```
 
-配合 `id: seq` 响应头与 `?after=` 参数实现断线续传；15s 心跳注释行防止代理超时断连。
+配合 `id: seq` 响应头与 `?after=` 参数实现断线续传；前端保存最后 seq、指数退避重连并幂等去重，15s 心跳防止代理超时断连。
 
 ### 2.3 human-in-the-loop
 
@@ -90,11 +90,11 @@ sequenceDiagram
 - **中文适配**：BM25 建立在 jieba 搜索粒度分词 + 停用词过滤上（英文统一小写），这是中文场景相对"字符 n-gram"或空格分词的关键提升点；
 - **BM25 自研**（Okapi 公式，倒排索引），按知识库缓存索引（chunk 计数变化即失效重建）；
 - **双方言**：PostgreSQL 用 `embedding <=> CAST(:emb AS vector)` 原生检索；SQLite 自动降级进程内余弦，评分口径一致，保证轻量模式与测试可用；
-- **引用溯源**：来源注册表（`sources.py`）给 kb chunk 与 web 页面统一编号 [n]，工具输出携带编号 → 模型在句末标注 → 回答后正则提取实际引用的编号，前端渲染可悬浮的角标。
+- **引用可信度**：来源注册表统一编号 [n]，同时保存服务端证据正文与 `verified` provenance；确定性审计检查无效编号、事实句覆盖率和原文读取比例，未知编号不会被前端渲染成可信角标。生成式上下文压缩只有在输出可定位为原文子串时才接受。
 
 ## 4. 深度研究流水线（`agents/deep_research.py`）
 
-五阶段：结构化规划（2-4 个子问题）→ 并行搜索员（各自 ReAct：search → fetch → 带引用纪要）→ 判官模型聚合交叉验证（关键发现/矛盾点/提纲）→ 写作员流式产出报告（引用编号约束在来源列表内）→ 评审员打分（不达标触发一轮修订）。
+五阶段：结构化规划 → 并行搜索员（search → fetch → 带引用纪要）→ 证据聚合 → 流式写作 → 评审/修订。评审模型会看到来源证据正文，确定性 CitationAudit 是独立硬门；修订提示包含上一版全文。达到上限仍不通过时保留最佳版本但标记 `needs_review`，禁止公开分享。
 
 工程要点：搜索员共享同一 `RunContext.state`，来源编号全局唯一；`merge_streams` 保证并行事件实时上浮；每阶段独立 Span 记录用量；任一搜索员失败不影响整体（全部失败才终止）。
 
@@ -109,18 +109,25 @@ sequenceDiagram
 
 - 密码：标准库 `hashlib.scrypt`（n=16384, r=8, p=1）加盐哈希，常数时间比较；
 - API Key：`af_` 前缀 + `secrets.token_urlsafe(32)`，只存 sha256，明文仅创建时返回一次；
-- 沙箱：`python -I` 隔离模式子进程 + 临时目录 + 超时强杀 + 输出截断，默认要求人工审批；生产建议容器级隔离（接口已抽象）；
-- SSRF：web_fetch 解析域名后拒绝私有/环回/保留地址；
+- Python 执行器：`python -I` 仅是本地演示用子进程，不宣称安全沙箱；默认关闭，生产配置一旦开启会拒绝启动，镜像也以非 root 用户运行；
+- SSRF：web_fetch/自定义 HTTP 工具仅放行全局可路由地址（拦截私有/环回/链路本地含云元数据 169.254.169.254、CGNAT 100.64/10）并禁止自动重定向；公网默认关闭自定义 HTTP 工具。彻底防 DNS 重绑定仍需网络层出口白名单，属部署侧职责；
 - 限流：Redis 固定窗口（用户 × 场景维度），不可用时进程内降级并告警日志。
 
 ## 6.5 进阶能力（增强模块）
 
 - **MCP 客户端**（`core/mcp/`）：传输层抽象（`StdioTransport` 子进程 / `InMemoryTransport` 测试）+ JSON-RPC 客户端（initialize/tools.list/tools.call）+ `MCPManager` 把外部工具包装为引擎 Tool；单个 server 失败不影响整体。示例 server 见 `samples/mcp_server.py`。
 - **安全护栏**（`core/guardrails/`）：`injection`（注入/越狱规则打分）+ `moderation`（内容审核）+ `pii`（脱敏）+ `engine`（编排裁决）。输入命中即拦截，输出统一脱敏；在 `services/chat.py` 接入，事件 `guardrail_triggered`。
-- **语义缓存**（`services/semantic_cache.py`）：作用域隔离（agent_type + kb_ids 哈希）+ 余弦阈值 + TTL；命中跳过 Agent 执行；事件 `cache_hit`，指标计入 Prometheus。
+- **语义缓存**（`services/semantic_cache.py`）：作用域包含 user/agent/model/embedding/KB revision，时效或指代查询绕过；同轮查询向量供缓存和长期记忆复用，避免重复 Embedding。
 - **RAG 进阶**（`rag/enhance.py` + `rag/pipeline.py`）：查询改写 / HyDE（向量与 BM25 查询分离）/ 上下文压缩 / 父子分块（`retriever._expand_parents`）；由 `RagPipeline` 统一编排，检索工具与 Playground 共用。
 - **可观测**（`observability/metrics.py` + `api/routers/dashboard.py`）：Prometheus 独立注册表；RunManager 在运行结束记录 run/tool 指标；看板聚合 DB 统计。
-- **自定义工具**（`services/custom_tools.py`）：用户定义的 HTTP 接口 → 运行时构建为 Tool（参数模板渲染 + SSRF 防护），随对话按 user 动态加载。
+- **自定义工具**（`services/custom_tools.py`）：用户定义的 HTTP 接口 → 运行时构建为 Tool；仅在受信任环境显式开启，随对话按 user 动态加载。
+
+## 6.6 生产发布边界
+
+- Docker 启动顺序固定为 `alembic upgrade head → uvicorn --workers 1`，应用生产进程不执行 `create_all`；
+- `/api/livez` 只检查进程，`/api/readyz` 检查数据库与 Alembic head；生产日志为 JSON 并携带 request ID；
+- RunManager 有全局/用户/会话三级并发准入，数据库故障时也会在 `finally` 关闭 SSE 并释放本地任务名额；
+- 当前明确限定单副本单 worker；分布式任务所有权完成前不提供伪水平扩展。
 
 ## 7. 水平扩展路径
 

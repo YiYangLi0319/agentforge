@@ -3,6 +3,7 @@
 import logging
 import time
 from typing import Protocol
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ class RedisRateLimiter:
             ttl = await self.redis.ttl(bucket)
             return False, max(int(ttl), 1)
         return True, 0
+
+    async def aclose(self) -> None:
+        await self.redis.aclose()
 
 
 class MemoryRateLimiter:
@@ -60,7 +64,8 @@ async def build_limiter(settings) -> RateLimiter:
             settings.redis_url, socket_connect_timeout=1.5, socket_timeout=1.5
         )
         await client.ping()
-        logger.info("限流后端: Redis (%s)", settings.redis_url)
+        parsed = urlsplit(settings.redis_url)
+        logger.info("限流后端: Redis (%s:%s)", parsed.hostname or "unknown", parsed.port or 6379)
         return RedisRateLimiter(client)
     except Exception as e:  # noqa: BLE001
         logger.warning("Redis 不可用（%s），限流降级为进程内实现", e)

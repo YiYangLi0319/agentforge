@@ -5,13 +5,14 @@ import remarkGfm from "remark-gfm";
 import type { Source } from "../lib/types";
 
 /** 把回答中的 [n] 引用角标转换为可交互的引用链接 */
-function linkifyCitations(text: string): string {
-  return text.replace(/\[(\d{1,3})\]/g, (_m, n) => `[${n}](#cite-${n})`);
+function linkifyCitations(text: string, validIds: Set<number>): string {
+  return text.replace(/\[(\d{1,3})\]/g, (match, n) =>
+    validIds.has(Number(n)) ? `[${n}](#cite-${n})` : match,
+  );
 }
 
-function CitationChip({ n, source }: { n: number; source?: Source }) {
+function CitationChip({ n, source }: { n: number; source: Source }) {
   const [open, setOpen] = useState(false);
-  if (!source) return <sup className="citation-chip">{n}</sup>;
   return (
     <span className="relative inline-block">
       <a
@@ -21,14 +22,24 @@ function CitationChip({ n, source }: { n: number; source?: Source }) {
         className="citation-chip"
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        aria-label={`查看来源 ${n}：${source.title || source.filename}`}
+        aria-expanded={open}
         onClick={(e) => {
-          if (!source.url) e.preventDefault();
+          if (!source.url) {
+            e.preventDefault();
+            setOpen((value) => !value);
+          }
         }}
       >
         {n}
       </a>
       {open && (
-        <span className="absolute bottom-full left-1/2 z-50 mb-1.5 w-72 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900 p-3 text-xs shadow-xl">
+        <span
+          role="tooltip"
+          className="absolute bottom-full left-1/2 z-50 mb-1.5 w-72 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900 p-3 text-xs shadow-xl"
+        >
           <span className="mb-1 flex items-center gap-1.5 font-medium text-zinc-200">
             <span
               className={
@@ -58,7 +69,10 @@ export default function Markdown({
   streaming?: boolean;
 }) {
   const sourceMap = useMemo(() => new Map(sources.map((s) => [s.id, s])), [sources]);
-  const processed = useMemo(() => linkifyCitations(content), [content]);
+  const processed = useMemo(
+    () => linkifyCitations(content, new Set(sourceMap.keys())),
+    [content, sourceMap],
+  );
 
   return (
     <div className={"md-body" + (streaming ? " streaming-caret" : "")}>
@@ -69,7 +83,8 @@ export default function Markdown({
             const match = href?.match(/^#cite-(\d+)$/);
             if (match) {
               const n = Number(match[1]);
-              return <CitationChip n={n} source={sourceMap.get(n)} />;
+              const source = sourceMap.get(n);
+              return source ? <CitationChip n={n} source={source} /> : <>{children}</>;
             }
             return (
               <a href={href} target="_blank" rel="noreferrer" {...props}>

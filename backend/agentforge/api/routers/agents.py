@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agentforge.api.deps import get_current_user, get_db
+from agentforge.api.app import Container
+from agentforge.api.deps import get_container, get_current_user, get_db
 from agentforge.db.models import CustomAgent, KnowledgeBase, User
 
 router = APIRouter()
@@ -45,10 +46,12 @@ def _dict(a: CustomAgent) -> dict:
     }
 
 
-async def _validate(db: AsyncSession, user: User, body: CustomAgentIn) -> None:
+async def _validate(db: AsyncSession, user: User, body: CustomAgentIn, container: Container) -> None:
     bad_tools = [t for t in body.tools if t not in SELECTABLE_TOOLS]
     if bad_tools:
         raise HTTPException(status_code=400, detail=f"未知工具: {', '.join(bad_tools)}")
+    if "python_execute" in body.tools and not container.settings.sandbox_enabled:
+        raise HTTPException(status_code=400, detail="当前环境未启用 Python 执行器")
     if body.kb_ids:
         owned = (
             (
@@ -66,8 +69,15 @@ async def _validate(db: AsyncSession, user: User, body: CustomAgentIn) -> None:
 
 
 @router.get("/tools")
-async def list_selectable_tools(user: User = Depends(get_current_user)) -> list[dict]:
-    return [{"name": k, "description": v} for k, v in SELECTABLE_TOOLS.items()]
+async def list_selectable_tools(
+    user: User = Depends(get_current_user),
+    container: Container = Depends(get_container),
+) -> list[dict]:
+    return [
+        {"name": k, "description": v}
+        for k, v in SELECTABLE_TOOLS.items()
+        if k != "python_execute" or container.settings.sandbox_enabled
+    ]
 
 
 @router.get("")
@@ -88,9 +98,12 @@ async def list_agents(
 
 @router.post("", status_code=201)
 async def create_agent(
-    body: CustomAgentIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    body: CustomAgentIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    container: Container = Depends(get_container),
 ) -> dict:
-    await _validate(db, user, body)
+    await _validate(db, user, body, container)
     agent = CustomAgent(
         user_id=user.id,
         name=body.name,
@@ -112,13 +125,14 @@ async def update_agent(
     body: CustomAgentIn,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    container: Container = Depends(get_container),
 ) -> dict:
     agent = (
         await db.execute(select(CustomAgent).where(CustomAgent.id == agent_id, CustomAgent.user_id == user.id))
     ).scalar_one_or_none()
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent 不存在")
-    await _validate(db, user, body)
+    await _validate(db, user, body, container)
     agent.name = body.name
     agent.description = body.description
     agent.system_prompt = body.system_prompt

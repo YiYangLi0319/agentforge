@@ -32,6 +32,8 @@ from agentforge.db.base import build_engine, build_sessionmaker, init_db
 from agentforge.db.models import Chunk, Document, EvalRecord, KnowledgeBase, User
 from agentforge.evals.judge import judge_answer, judge_task
 from agentforge.evals.metrics import aggregate, hit_rate_at_k, mrr, ndcg_at_k, recall_at_k
+from agentforge.rag.citations import audit_citations
+from agentforge.rag.pipeline import RagPipeline
 from agentforge.rag.retriever import HybridRetriever
 from agentforge.services.ingestion import ingest_document
 
@@ -137,7 +139,13 @@ async def run_rag_suite(ectx: EvalContext, dataset: Path) -> dict:
     rows = []
     for case in cases:
         ctx = RunContext(user_id="eval", kb_ids=[ectx.kb_id])
-        ctx.services["retriever"] = ectx.retriever
+        ctx.services.update(
+            {
+                "retriever": ectx.retriever,
+                "rag_pipeline": RagPipeline(ectx.retriever, ectx.llm),
+                "settings": ectx.settings,
+            }
+        )
         agent = Agent(
             name="rag_eval",
             llm=ectx.llm,
@@ -156,7 +164,9 @@ async def run_rag_suite(ectx: EvalContext, dataset: Path) -> dict:
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage, cost = ctx.tracer.totals()
 
-        context_text = "\n".join(s.get("snippet", "") for s in ctx.state.get("sources", []))
+        sources = ctx.state.get("sources", [])
+        context_text = "\n".join(s.get("evidence") or s.get("snippet", "") for s in sources)
+        citation_audit = audit_citations(answer, sources, require_citations=True)
         judgement, _ = await judge_answer(
             ectx.judge,
             question=case["question"],
@@ -171,6 +181,9 @@ async def run_rag_suite(ectx: EvalContext, dataset: Path) -> dict:
                 "faithfulness": judgement.faithfulness,
                 "relevance": judgement.relevance,
                 "citation": judgement.citation,
+                "citation_integrity": citation_audit.passed,
+                "citation_coverage": citation_audit.coverage,
+                "invalid_citations": citation_audit.invalid_ids,
                 "reason": judgement.reason,
                 "latency_ms": latency_ms,
                 "tokens": usage.total_tokens,
@@ -181,6 +194,8 @@ async def run_rag_suite(ectx: EvalContext, dataset: Path) -> dict:
         "faithfulness": aggregate([r["faithfulness"] for r in rows]),
         "relevance": aggregate([r["relevance"] for r in rows]),
         "citation": aggregate([r["citation"] for r in rows]),
+        "citation_integrity_rate": aggregate([1.0 if r["citation_integrity"] else 0.0 for r in rows]),
+        "citation_coverage": aggregate([r["citation_coverage"] for r in rows]),
         "avg_latency_ms": int(aggregate([float(r["latency_ms"]) for r in rows])),
         "avg_tokens": int(aggregate([float(r["tokens"]) for r in rows])),
         "total_cost": round(sum(r["cost"] for r in rows), 4),
@@ -257,6 +272,23 @@ def render_report(result: dict, llm_desc: str) -> str:
     return "\n".join(lines)
 
 
+def threshold_failures(result: dict, specs: list[str]) -> list[str]:
+    """解析 metric=value 阈值并返回失败原因，供 CI 建立可执行质量门。"""
+    failures: list[str] = []
+    for spec in specs:
+        try:
+            metric, raw = spec.rsplit("=", 1)
+            minimum = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"无效阈值 {spec!r}，应为 metric=value") from exc
+        actual = result["metrics"].get(metric)
+        if not isinstance(actual, int | float):
+            failures.append(f"指标 {metric!r} 不存在或不是数值")
+        elif float(actual) < minimum:
+            failures.append(f"{metric}={actual} 低于阈值 {minimum}")
+    return failures
+
+
 async def persist_record(ectx: EvalContext, result: dict, used_judge: bool) -> None:
     async with ectx.sessions() as db:
         db.add(
@@ -277,6 +309,13 @@ async def main() -> None:
     parser.add_argument("--dataset", type=str, default="", help="自定义 JSONL 数据集路径")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--output-dir", type=str, default=str(REPORTS_DIR))
+    parser.add_argument(
+        "--fail-under",
+        action="append",
+        default=[],
+        metavar="METRIC=VALUE",
+        help="质量门，可重复指定；任一指标低于阈值时以非零状态退出",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -311,6 +350,9 @@ async def main() -> None:
             )
             await persist_record(ectx, result, used_judge=suite in ("rag", "agent"))
             print(f"  报告已写入: {report_path}\n")
+            failures = threshold_failures(result, args.fail_under)
+            if failures:
+                raise SystemExit("评估质量门失败：" + "；".join(failures))
     finally:
         await ectx.close()
 

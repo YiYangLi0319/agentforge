@@ -66,6 +66,10 @@ async def compress_context(
             compressed.append(chunk)
             continue
         if result.relevant and result.extract.strip():
-            chunk = chunk.model_copy(update={"content": result.extract.strip()})
-            compressed.append(chunk)
+            extract = result.extract.strip()
+            if extract in chunk.content:
+                compressed.append(chunk.model_copy(update={"content": extract}))
+            else:
+                logger.warning("压缩结果不是可定位的原文子串，拒绝生成式改写并保留原块")
+                compressed.append(chunk)
     return compressed or chunks  # 全被压没时退回原结果，避免空手

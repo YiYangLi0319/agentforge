@@ -61,8 +61,13 @@ class Settings(BaseSettings):
     research_max_workers: int = 3
     research_max_sources: int = 12
     research_max_revisions: int = 2  # 报告未达标时的最大迭代修订轮数（Reflexion 循环）
+    max_concurrent_runs: int = 8
+    max_concurrent_runs_per_user: int = 2
+    max_concurrent_runs_per_session: int = 1
+    sandbox_enabled: bool = False
     sandbox_timeout: int = 20
     sandbox_requires_approval: bool = True
+    custom_http_tools_enabled: bool = False
     chat_history_token_budget: int = 6000
 
     # 限流
@@ -104,6 +109,31 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    @property
+    def is_production(self) -> bool:
+        return self.env.lower() in {"prod", "production"}
+
+    def validate_runtime(self) -> None:
+        """在装配外部依赖前执行生产安全门禁，避免危险默认值静默上线。"""
+        if not self.is_production:
+            return
+        if self.secret_key == "dev-secret-change-me" or len(self.secret_key) < 32:
+            raise ValueError("生产环境 SECRET_KEY 必须是至少 32 位的随机字符串")
+        if self.llm_provider == "mock":
+            raise ValueError("生产环境禁止使用 Mock LLM，请配置真实 LLM_PROVIDER 与 API Key")
+        if self.llm_provider not in {"deepseek", "qwen", "openai", "glm", "moonshot", "custom"}:
+            raise ValueError(f"生产环境不接受未知 LLM_PROVIDER={self.llm_provider}")
+        if not self.llm_api_key:
+            raise ValueError("生产环境必须配置 LLM_API_KEY，禁止静默降级为 Mock")
+        if self.llm_provider == "custom" and not self.llm_base_url:
+            raise ValueError("LLM_PROVIDER=custom 时必须配置 LLM_BASE_URL")
+        if self.sandbox_enabled:
+            raise ValueError("内置 Python 执行器不具备容器级隔离，生产环境必须设置 SANDBOX_ENABLED=false")
+        if self.admin_username and not self.registration_invite_code:
+            raise ValueError(
+                "生产环境配置 ADMIN_USERNAME 时必须同时设置 REGISTRATION_INVITE_CODE，防止管理员用户名被抢注"
+            )
 
 
 @lru_cache

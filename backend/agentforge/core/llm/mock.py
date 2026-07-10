@@ -128,6 +128,20 @@ class MockChatModel(ChatModel):
                 message=Message.assistant(content), usage=self._usage(messages, content), model=self.model
             )
 
+        if "资深研究报告撰写人" in user_text:
+            content = (
+                "# Mock 深度研究报告\n\n"
+                "## 摘要\n\n调研材料显示，该主题已形成可继续验证的阶段性结论 [1]。\n\n"
+                "## 关键分析\n\n根据已登记来源，当前证据支持报告中的核心判断 [1]。"
+                "不同来源仍需在真实模型模式下进一步交叉核验 [1]。\n\n"
+                "## 结论与建议\n\n建议接入真实搜索与模型后复跑评估，并保留来源审计记录 [1]。"
+            )
+            return ChatResponse(
+                message=Message.assistant(content),
+                usage=self._usage(messages, content),
+                model=self.model,
+            )
+
         # 有工具且最后一条不是工具结果 -> 先调用第一个工具（演示 ReAct 循环）
         if tools and messages and messages[-1].role != Role.TOOL:
             fn = tools[0].get("function", {})

@@ -147,7 +147,11 @@ async def test_admin_requires_privilege(client, auth_headers):
 
 async def test_admin_flow(app, client):
     app.state.container.settings.admin_username = "boss"
-    await client.post("/api/auth/register", json={"username": "boss", "password": "boss12345"})
+    app.state.container.settings.registration_invite_code = "admin-invite"
+    await client.post(
+        "/api/auth/register",
+        json={"username": "boss", "password": "boss12345", "invite_code": "admin-invite"},
+    )
     login = await client.post("/api/auth/login", json={"username": "boss", "password": "boss12345"})
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 

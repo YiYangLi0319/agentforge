@@ -62,7 +62,7 @@ def build_custom_tool(row: CustomTool) -> Tool:
 
         body = _render(row.body_template, kwargs) if row.body_template else None
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
                 resp = await client.request(
                     method,
                     url,
@@ -72,6 +72,8 @@ def build_custom_tool(row: CustomTool) -> Tool:
                 )
         except httpx.HTTPError as e:
             return ToolResult.error(f"请求失败: {type(e).__name__}: {e}")
+        if 300 <= resp.status_code < 400:
+            return ToolResult.error("目标返回重定向；为防止 SSRF，自定义工具不会自动跟随")
         text = resp.text[:4000]
         ok = resp.status_code < 400
         return ToolResult(ok=ok, content=f"HTTP {resp.status_code}\n{text}", data={"status": resp.status_code})

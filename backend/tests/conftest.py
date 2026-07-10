@@ -24,7 +24,12 @@ def app_settings(tmp_path):
         search_provider="mock",
         upload_dir=str(tmp_path / "uploads"),
         secret_key="test-secret-key-0123456789abcdef-0123456789abcdef",
+        sandbox_enabled=True,
         sandbox_requires_approval=False,
+        custom_http_tools_enabled=True,
+        max_concurrent_runs=20,
+        max_concurrent_runs_per_user=20,
+        max_concurrent_runs_per_session=20,
     )
 
 

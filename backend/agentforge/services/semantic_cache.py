@@ -27,8 +27,25 @@ def _record_cache(hit: bool) -> None:
         pass
 
 
-def scope_key(agent_type: str, kb_ids: list[str]) -> str:
-    raw = agent_type + "|" + ",".join(sorted(kb_ids))
+def scope_key(
+    agent_type: str,
+    kb_ids: list[str],
+    *,
+    user_id: str = "",
+    model: str = "",
+    embedding_model: str = "",
+    revision: str = "",
+) -> str:
+    raw = "|".join(
+        (
+            user_id,
+            agent_type,
+            ",".join(sorted(kb_ids)),
+            model,
+            embedding_model,
+            revision,
+        )
+    )
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -59,12 +76,30 @@ class SemanticCache:
         self.hits = 0
         self.misses = 0
 
-    async def lookup(self, agent_type: str, kb_ids: list[str], query: str) -> CacheLookup | None:
+    async def lookup(
+        self,
+        agent_type: str,
+        kb_ids: list[str],
+        query: str,
+        *,
+        user_id: str = "",
+        model: str = "",
+        embedding_model: str = "",
+        revision: str = "",
+        query_embedding: list[float] | None = None,
+    ) -> CacheLookup | None:
         if not self.enabled:
             return None
-        key = scope_key(agent_type, kb_ids)
+        key = scope_key(
+            agent_type,
+            kb_ids,
+            user_id=user_id,
+            model=model,
+            embedding_model=embedding_model,
+            revision=revision,
+        )
         cutoff = datetime.now(UTC) - timedelta(seconds=self.ttl_seconds)
-        query_emb = await self.embeddings.embed_one(query)
+        query_emb = query_embedding or await self.embeddings.embed_one(query)
 
         async with self.sessions() as db:
             rows = (
@@ -104,18 +139,55 @@ class SemanticCache:
         return None
 
     async def store(
-        self, agent_type: str, kb_ids: list[str], query: str, answer: str, sources: list[dict]
+        self,
+        agent_type: str,
+        kb_ids: list[str],
+        query: str,
+        answer: str,
+        sources: list[dict],
+        *,
+        user_id: str = "",
+        model: str = "",
+        embedding_model: str = "",
+        revision: str = "",
+        query_embedding: list[float] | None = None,
     ) -> None:
         if not self.enabled or not answer.strip():
             return
-        key = scope_key(agent_type, kb_ids)
-        emb = await self.embeddings.embed_one(query)
+        key = scope_key(
+            agent_type,
+            kb_ids,
+            user_id=user_id,
+            model=model,
+            embedding_model=embedding_model,
+            revision=revision,
+        )
+        emb = query_embedding or await self.embeddings.embed_one(query)
         async with self.sessions() as db:
-            db.add(
-                SemanticCacheEntry(
-                    scope_key=key, query=query, answer=answer, sources=sources, embedding=emb
+            existing = (
+                await db.execute(
+                    select(SemanticCacheEntry).where(
+                        SemanticCacheEntry.scope_key == key,
+                        SemanticCacheEntry.query == query,
+                    )
                 )
-            )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(
+                    SemanticCacheEntry(
+                        scope_key=key,
+                        query=query,
+                        answer=answer,
+                        sources=sources,
+                        embedding=emb,
+                    )
+                )
+            else:
+                existing.answer = answer
+                existing.sources = sources
+                existing.embedding = emb
+                existing.created_at = datetime.now(UTC)
+                existing.last_used_at = datetime.now(UTC)
             await db.commit()
 
     async def stats(self) -> dict:

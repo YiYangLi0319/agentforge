@@ -78,7 +78,18 @@ async def test_semantic_cache_hit_event_in_run(app, client, auth_headers):
     """预置一条缓存后发起对话，运行输出应标记 cached。"""
     q = "公司的年假政策是怎样的"
     container = app.state.container
-    await container.semantic_cache.store("assistant", [], q, "年假按工龄计算 [1]。", [{"id": 1, "title": "制度"}])
+    me = (await client.get("/api/auth/me", headers=auth_headers)).json()
+    await container.semantic_cache.store(
+        "assistant",
+        [],
+        q,
+        "年假按工龄计算 [1]。",
+        [{"id": 1, "title": "制度"}],
+        user_id=me["user_id"],
+        model=f"{container.llm.provider}/{container.llm.model}",
+        embedding_model=f"{container.embeddings.provider}/{container.embeddings.model}",
+        revision="builtin-agent-v2|",
+    )
 
     session = (await client.post("/api/chat/sessions", json={}, headers=auth_headers)).json()
     run = await post_and_drain(client, session["id"], q, auth_headers)

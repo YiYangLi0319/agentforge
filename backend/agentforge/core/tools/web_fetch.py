@@ -15,17 +15,32 @@ MAX_TEXT = 8000
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 AgentForge/0.1"
 
 
+def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """仅认可全局可路由地址。可拦截私有/环回/链路本地(含 169.254 云元数据)/CGNAT 等。"""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.ip_network("100.64.0.0/10"):
+        return False  # 运营商级 NAT（is_global 在部分版本未覆盖）
+    return bool(ip.is_global)
+
+
 def _is_private_host(host: str) -> bool:
-    """SSRF 防护：解析域名并拒绝私有/环回/链路本地地址。"""
+    """SSRF 防护：解析域名，任一解析结果非全局可路由即拒绝。"""
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
         return True
+    saw_address = False
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        saw_address = True
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
             return True
-    return False
+        if not _ip_is_public(ip):
+            return True
+    return not saw_address
 
 
 def extract_main_text(html: str) -> tuple[str, str]:
@@ -59,9 +74,11 @@ async def web_fetch(url: str, ctx: ToolContext | None = None) -> ToolResult:
         title, text = f"模拟页面: {url[:60]}", f"这是离线演示模式下 {url} 的模拟正文内容。"
     else:
         async with httpx.AsyncClient(
-            headers={"User-Agent": _UA}, follow_redirects=True, timeout=20.0
+            headers={"User-Agent": _UA}, follow_redirects=False, timeout=20.0
         ) as client:
             async with client.stream("GET", url) as resp:
+                if 300 <= resp.status_code < 400:
+                    return ToolResult.error("目标返回重定向；为防止 SSRF，抓取器不会自动跟随")
                 if resp.status_code >= 400:
                     return ToolResult.error(f"HTTP {resp.status_code}")
                 content_type = resp.headers.get("content-type", "")
@@ -80,7 +97,15 @@ async def web_fetch(url: str, ctx: ToolContext | None = None) -> ToolResult:
     if ctx is not None:
         from agentforge.core.tools.sources import register_source
 
-        n = register_source(ctx.state, origin="web", title=title or url, url=url, snippet=text[:200])
+        n = register_source(
+            ctx.state,
+            origin="web",
+            title=title or url,
+            url=url,
+            snippet=text[:200],
+            verified=True,
+            evidence=text,
+        )
         return ToolResult(
             content=f"[{n}] 标题: {title}\n\n{text}", data={"title": title, "length": len(text)}
         )

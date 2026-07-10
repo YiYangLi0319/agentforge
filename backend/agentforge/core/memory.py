@@ -24,6 +24,10 @@ class ConversationMemory:
         self.llm = llm
         self.token_budget = token_budget
         self.keep_recent = keep_recent
+        self.did_compact = False
+
+    def should_compact(self, history: list[Message]) -> bool:
+        return estimate_messages_tokens(history) > self.token_budget and len(history) > self.keep_recent
 
     def _with_summary(self, messages: list[Message], summary: str) -> list[Message]:
         if not summary:
@@ -32,7 +36,8 @@ class ConversationMemory:
         return [note] + messages
 
     async def prepare(self, history: list[Message], summary: str = "") -> tuple[list[Message], str]:
-        if estimate_messages_tokens(history) <= self.token_budget or len(history) <= self.keep_recent:
+        self.did_compact = False
+        if not self.should_compact(history):
             return self._with_summary(history, summary), summary
 
         old, recent = history[: -self.keep_recent], history[-self.keep_recent :]
@@ -45,8 +50,9 @@ class ConversationMemory:
             prompt += f"【已有摘要】\n{summary}\n\n"
         prompt += f"【需要合并压缩的对话】\n{transcript}"
         try:
-            resp = await self.llm.complete([Message.user(prompt)], temperature=0.1)
+            resp = await self.llm.complete([Message.user(prompt)], temperature=0.1, max_tokens=400)
             new_summary = resp.message.content.strip()
+            self.did_compact = bool(new_summary)
         except Exception as e:  # noqa: BLE001 摘要失败不阻断对话
             logger.warning("对话摘要失败，保留原摘要: %s", e)
             new_summary = summary
@@ -123,8 +129,16 @@ class LongTermMemory:
             await self.store.add(user_id, to_add)
         return len(to_add)
 
-    async def retrieve(self, user_id: str, query: str, k: int = 5, min_similarity: float = 0.3) -> list[str]:
-        emb = await self.embeddings.embed_one(query)
+    async def retrieve(
+        self,
+        user_id: str,
+        query: str,
+        k: int = 5,
+        min_similarity: float = 0.3,
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> list[str]:
+        emb = query_embedding or await self.embeddings.embed_one(query)
         rows = await self.store.search(user_id, emb, k)
         return [r["content"] for r in rows if r.get("similarity", 0) >= min_similarity]
 

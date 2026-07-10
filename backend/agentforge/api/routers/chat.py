@@ -1,6 +1,6 @@
 """会话与消息路由：会话 CRUD、发消息触发 Agent Run。"""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,9 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agentforge.api.app import Container
 from agentforge.api.deps import get_container, get_current_user, get_db, rate_limited
 from agentforge.core.runtime import RunContext
-from agentforge.db.models import ChatMessage, ChatSession, CustomAgent, KnowledgeBase, User
+from agentforge.db.models import ChatMessage, ChatSession, CustomAgent, KnowledgeBase, Run, User
 from agentforge.services.chat import make_chat_factory
 from agentforge.services.quota import assert_within_quota
+from agentforge.services.runs import RunLimitExceeded
 
 router = APIRouter()
 
@@ -23,7 +24,7 @@ class SessionCreate(BaseModel):
 
 
 class SessionPatch(BaseModel):
-    title: str | None = Field(default=None, max_length=256)
+    title: str | None = Field(default=None, min_length=1, max_length=256)
     agent_type: str | None = Field(default=None, pattern="^(assistant|team|custom)$")
     kb_ids: list[str] | None = None
 
@@ -99,15 +100,17 @@ async def create_session(
 
 @router.get("/sessions")
 async def list_sessions(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    q: str = Query(default="", max_length=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
+    stmt = select(ChatSession).where(ChatSession.user_id == user.id)
+    if q.strip():
+        stmt = stmt.where(ChatSession.title.ilike(f"%{q.strip()}%"))
     rows = (
         (
             await db.execute(
-                select(ChatSession)
-                .where(ChatSession.user_id == user.id)
-                .order_by(desc(ChatSession.updated_at))
-                .limit(100)
+                stmt.order_by(desc(ChatSession.updated_at)).limit(100)
             )
         )
         .scalars()
@@ -134,8 +137,22 @@ async def get_session(
         .scalars()
         .all()
     )
+    active_run = (
+        await db.execute(
+            select(Run.id, Run.status)
+            .where(
+                Run.session_id == session_id,
+                Run.status.in_(("pending", "running", "awaiting_approval", "resuming")),
+            )
+            .order_by(desc(Run.created_at))
+            .limit(1)
+        )
+    ).first()
     return {
         **_session_dict(s),
+        "active_run": (
+            {"id": active_run.id, "status": active_run.status} if active_run else None
+        ),
         "messages": [
             {
                 "id": m.id,
@@ -159,7 +176,10 @@ async def patch_session(
 ) -> dict:
     s = await _own_session(db, user, session_id)
     if body.title is not None:
-        s.title = body.title
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="会话标题不能为空")
+        s.title = title
     if body.agent_type is not None:
         s.agent_type = body.agent_type
     if body.kb_ids is not None:
@@ -175,6 +195,20 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
 ):
     s = await _own_session(db, user, session_id)
+    active = (
+        (
+            await db.execute(
+                select(Run.id).where(
+                    Run.session_id == session_id,
+                    Run.status.in_(("pending", "running", "awaiting_approval", "resuming")),
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if active is not None:
+        raise HTTPException(status_code=409, detail="会话仍有运行中的任务，请先取消或等待完成")
     await db.execute(delete(ChatMessage).where(ChatMessage.session_id == session_id))
     await db.delete(s)
     await db.commit()
@@ -195,18 +229,50 @@ async def post_message(
     s = await _own_session(db, user, session_id)
     await assert_within_quota(db, user, container.settings)
 
+    old_title = s.title
     user_msg = ChatMessage(session_id=session_id, role="user", content=body.content)
     db.add(user_msg)
     if s.title == "新对话":
         s.title = body.content[:30]
     await db.commit()
 
-    run_id = await container.run_manager.start(
-        user_id=user.id,
-        kind="chat",
-        input={"message": body.content, "session_id": session_id},
-        session_id=session_id,
-        ctx=RunContext(),
-        factory=make_chat_factory(container, s, body.content),
-    )
+    try:
+        run_id = await container.run_manager.start(
+            user_id=user.id,
+            kind="chat",
+            input={"message": body.content, "session_id": session_id},
+            session_id=session_id,
+            ctx=RunContext(),
+            factory=make_chat_factory(container, s, body.content),
+        )
+    except RunLimitExceeded as exc:
+        await db.delete(user_msg)
+        s.title = old_title
+        await db.commit()
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     return {"run_id": run_id, "user_message_id": user_msg.id}
+
+
+@router.get("/sessions/{session_id}/export")
+async def export_session(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    session = await _own_session(db, user, session_id)
+    messages = (
+        await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at, ChatMessage.id)
+        )
+    ).scalars().all()
+    lines = [f"# {session.title}", ""]
+    for message in messages:
+        role = "用户" if message.role == "user" else "AgentForge"
+        lines.extend((f"## {role}", "", message.content, ""))
+    return Response(
+        content="\n".join(lines),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="chat-{session.id[:8]}.md"'},
+    )

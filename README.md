@@ -21,17 +21,17 @@ AgentForge 是一个**不依赖 LangChain / LangGraph、从协议层开始自研
 
 - **自研 Agent 引擎**：消息协议、工具注册（签名 + docstring 自动生成 JSON Schema）、ReAct 循环、并行工具执行、事件流架构、token 预算熔断；
 - **多 Agent 编排**：Supervisor 委派模式 + Planner-Executor 工作流模式（拓扑分波并行），两种范式各有适用场景；
-- **深度研究 Agent**：规划 → 并行搜索子 Agent → 证据聚合交叉验证 → 流式撰写带引用报告 → 评审修订；
+- **深度研究 Agent**：规划 → 并行搜索子 Agent → 证据聚合交叉验证 → 流式撰写 → 基于来源原文的评审与修订；引用完整性硬门未通过时标记 `needs_review` 并禁止公开分享；
 - **Agentic RAG**：中文友好混合检索（jieba BM25 + pgvector 向量 + RRF 融合 + 可选重排），chunk 级引用溯源；**进阶**：查询改写 / HyDE / 上下文压缩 / 父子分块（small-to-big）；
 - **MCP 协议**：作为客户端接入外部 MCP 工具服务器（JSON-RPC，对齐 Anthropic 标准），自动把其工具注入 Agent；
 - **安全护栏**：Prompt 注入检测、内容审核、输出 PII 脱敏（输入拦截 + 输出清洗）；
-- **语义缓存**：相似问题向量命中复用历史答案，作用域隔离 + TTL + 命中率统计，显著降本提速；
-- **工具生态**：内置搜索/抓取/沙箱/计算器/时间等工具 + 在 UI 里自定义 HTTP 工具（运行时动态注入）；
-- **企业级基建**：JWT/API Key 双通道认证、Redis 限流（自动降级）、SSE 流式推送（断线续传）、human-in-the-loop 审批、事件溯源 + Checkpoint 断点恢复、全链路 Tracing（tokens/成本/耗时）；
-- **评估体系**：检索指标（Recall@K/MRR/nDCG）+ LLM-as-judge（忠实度/相关性/引用规范）+ Agent 任务完成率，一键出报告；
+- **语义缓存**：相似问题向量命中复用历史答案；按用户/Agent/模型/Embedding/知识库版本隔离，时效或指代问题自动绕过，TTL + 命中率统计；
+- **工具生态**：内置搜索/抓取/计算器/时间等工具 + 可选 Python 执行器和自定义 HTTP 工具；高风险工具默认关闭，生产环境强制禁用宿主级 Python 执行器；
+- **企业级基建**：JWT/API Key 认证、Redis 限流、SSE 持久化重放与自动重连、HITL 审批、Checkpoint、并发准入、重启状态收敛、Alembic 自动迁移、`livez/readyz` 探针、JSON 关联日志；
+- **评估体系**：检索指标 + LLM-as-judge + Agent 完成率 + 确定性引用审计；CLI `--fail-under` 将质量基线变成 CI 可执行门禁；
 - **可观测看板**：用量/成本/延迟趋势、工具使用 Top、缓存命中率、系统能力总览 + Prometheus `/metrics` 导出；
 - **平台化/多用户**：自定义 Agent 构建器（人设+工具+知识库）、每用户每日 token 配额、回答赞踩反馈（可导出为评估数据集）、管理后台（用户/用量/成本总览+配额调整）、数据分析 Agent（CSV → Text2SQL → 图表）；
-- **完整前端**：流式聊天（含赞踩反馈）、Agent 执行时间线（含护栏/缓存事件）、审批卡片、知识库管理与检索 Playground、Trace 树、工具管理、可观测看板、自定义 Agent、数据分析、管理后台。
+- **完整前端**：流式聊天、Agent 时间线、审批卡片、知识库、Trace、工具、看板、自定义 Agent、数据分析和管理后台；支持路由级分包、移动端导航、会话搜索/重命名/导出及研究任务刷新恢复。
 
 **零依赖可跑**：内置确定性 Mock Provider，不配任何 API Key、不装 Docker 也能完整体验全部功能（含测试与 CI）。
 
@@ -104,7 +104,7 @@ docker compose up -d --build        # 前端 http://localhost:8080，后端 http
 
 ### 部署上线（PaaS 单镜像）
 
-根目录 `Dockerfile` 为**单镜像方案**（后端同源托管前端），推到 GitHub 后可在 Render / Railway / Zeabur 等一键部署。详见 [DEPLOY.md](DEPLOY.md)。
+根目录 `Dockerfile` 为**单镜像方案**（非 root、启动前执行 Alembic、固定单 worker，后端同源托管前端），推到 GitHub 后可在 Render / Railway / Zeabur 等一键部署。详见 [DEPLOY.md](DEPLOY.md)。
 
 ### 接入真实大模型
 
@@ -126,8 +126,8 @@ TAVILY_API_KEY=tvly-xxxxxxxx
 
 | 页面 | 演示点 |
 | --- | --- |
-| 智能对话 | 绑定知识库提问 → 观察右侧时间线：检索工具调用 → 回答带 [n] 引用角标（悬浮看原文）；让它"写代码算 xx" → 触发沙箱审批卡片（批准/拒绝） |
-| 深度研究 | 输入研究主题 → 实时看到研究计划、多个搜索员并行工作、报告流式生成、评审打分 |
+| 智能对话 | 绑定知识库提问 → 观察右侧时间线：检索工具调用 → 回答带 [n] 引用角标；本地显式开启 `SANDBOX_ENABLED=true` 后可演示代码执行审批 |
+| 深度研究 | 输入研究主题 → 实时看到真实阶段、多个搜索员并行工作、报告生成、引用质量审计与自动修订；刷新页面可恢复现场 |
 | 知识库 | 上传 PDF/Word/Markdown → 检索 Playground 对比 混合/纯向量/纯BM25 的召回与评分拆解 |
 | 运行追踪 | 任意一次运行的完整 Span 树：每次 LLM 调用/工具执行的耗时、tokens、成本 |
 
@@ -153,7 +153,7 @@ mypy agentforge          # 全量类型检查通过
 python scripts/smoke_e2e.py   # 对运行中的服务做端到端验收
 ```
 
-CI（GitHub Actions）：后端 lint + 类型 + 测试 + 评估管道冒烟；前端 tsc + vite build。
+CI（GitHub Actions）：后端 lint + 类型 + 110+ 离线测试 + 带阈值的检索回归；前端 tsc + 路由分包构建。
 
 ## 项目结构
 

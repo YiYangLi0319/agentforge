@@ -93,6 +93,14 @@ class PlanCreated(_BaseEvent):
     plan: dict = Field(default_factory=dict)
 
 
+class ResearchPhaseChanged(_BaseEvent):
+    type: Literal["research_phase_changed"] = "research_phase_changed"
+    phase: str
+    completed_tasks: int = 0
+    total_tasks: int = 0
+    revision: int = 0
+
+
 class ResearchTaskStarted(_BaseEvent):
     type: Literal["research_task_started"] = "research_task_started"
     task_id: str
@@ -118,6 +126,7 @@ class ReportReview(_BaseEvent):
     passed: bool
     scores: dict = Field(default_factory=dict)
     feedback: str = ""
+    audit: dict = Field(default_factory=dict)
 
 
 class MemoryUpdated(_BaseEvent):
@@ -167,6 +176,7 @@ AgentEvent = Annotated[
     | Checkpoint
     | SourcesUpdated
     | PlanCreated
+    | ResearchPhaseChanged
     | ResearchTaskStarted
     | ResearchTaskFinished
     | ReportDraft

@@ -32,6 +32,9 @@ async def test_health_and_meta(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok" and body["db"] == "sqlite"
+    assert (await client.get("/api/livez")).json()["status"] == "ok"
+    ready = await client.get("/api/readyz")
+    assert ready.status_code == 200 and ready.json()["status"] == "ready"
 
     meta = (await client.get("/api/meta")).json()
     assert meta["mock_mode"] is True

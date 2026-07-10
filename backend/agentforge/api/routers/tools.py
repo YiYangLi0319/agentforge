@@ -41,7 +41,11 @@ class CustomToolIn(BaseModel):
 
 
 @router.get("/builtin")
-async def list_builtin_tools(user: User = Depends(get_current_user)) -> list[dict]:
+async def list_builtin_tools(
+    user: User = Depends(get_current_user),
+    container: Container = Depends(get_container),
+) -> list[dict]:
+    tools = [t for t in _BUILTINS if t.name != "python_execute" or container.settings.sandbox_enabled]
     return [
         {
             "name": t.name,
@@ -50,7 +54,7 @@ async def list_builtin_tools(user: User = Depends(get_current_user)) -> list[dic
             "tags": t.tags,
             "parameters": t.parameters,
         }
-        for t in _BUILTINS
+        for t in tools
     ]
 
 
@@ -165,7 +169,10 @@ async def test_custom_tool(
     body: ToolTestIn,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    container: Container = Depends(get_container),
 ) -> dict:
+    if not container.settings.custom_http_tools_enabled:
+        raise HTTPException(status_code=403, detail="当前环境已禁用自定义 HTTP 工具执行")
     row = (
         await db.execute(select(CustomTool).where(CustomTool.id == tool_id, CustomTool.user_id == user.id))
     ).scalar_one_or_none()

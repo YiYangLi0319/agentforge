@@ -1,6 +1,9 @@
 """对话服务：装配助手/团队 Agent，串联记忆、检索、引用与消息持久化。"""
 
+import hashlib
+import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -27,22 +30,33 @@ from agentforge.core.tools.python_sandbox import python_execute
 from agentforge.core.tools.retrieval import search_knowledge_base
 from agentforge.core.tools.web_fetch import web_fetch
 from agentforge.core.tools.web_search import web_search
-from agentforge.db.models import ChatMessage, ChatSession
-from agentforge.rag.citations import cited_sources
+from agentforge.db.models import ChatMessage, ChatSession, KnowledgeBase
+from agentforge.rag.citations import audit_citations, cited_sources, sanitize_invalid_citations
 from agentforge.rag.pipeline import RagPipeline
 from agentforge.services.custom_tools import load_custom_tools
 
 logger = logging.getLogger(__name__)
 
+_CACHE_BYPASS_RE = re.compile(
+    r"(继续|上面|上述|刚才|前面|第[一二三四五六七八九十\d]+个|它|这个|那个|"
+    r"今天|现在|当前|最新|实时|天气|股价|汇率|几点)"
+)
 
-def _assistant_system_prompt(has_kb: bool, memories_note: str) -> str:
+
+def _cacheable_query(query: str) -> bool:
+    return len(query.strip()) >= 6 and not _CACHE_BYPASS_RE.search(query)
+
+
+def _assistant_system_prompt(has_kb: bool, memories_note: str, sandbox_enabled: bool) -> str:
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     parts = [
         "你是 AgentForge 企业智能助手，专业、简洁、可靠。今天是 " + today + "。",
         "回答规则：",
         "- 需要实时信息或外部事实时使用 web_search / web_fetch；",
-        "- 需要精确算术用 calculator，需要复杂计算/数据处理用 python_execute，需要当前时间用 current_time；",
+        "- 需要精确算术用 calculator，需要当前时间用 current_time；",
     ]
+    if sandbox_enabled:
+        parts.append("- 需要复杂计算或数据处理时可使用需人工审批的 python_execute；")
     if has_kb:
         parts.append(
             "- 涉及企业内部知识（制度/产品/规范等）必须先调用 search_knowledge_base 检索，"
@@ -65,7 +79,9 @@ def _sandbox_tool(container: Container) -> Tool:
 def _build_assistant(
     container: Container, kb_ids: list[str], memories_note: str, extra_tools: list[Tool] | None = None
 ) -> Agent:
-    tools: list[Tool] = [web_search, web_fetch, calculator, current_time, _sandbox_tool(container)]
+    tools: list[Tool] = [web_search, web_fetch, calculator, current_time]
+    if container.settings.sandbox_enabled:
+        tools.append(_sandbox_tool(container))
     if kb_ids:
         tools.insert(0, search_knowledge_base)
     tools.extend(extra_tools or [])
@@ -73,7 +89,9 @@ def _build_assistant(
         name="assistant",
         llm=container.llm,
         tools=ToolRegistry(tools),
-        system_prompt=_assistant_system_prompt(bool(kb_ids), memories_note),
+        system_prompt=_assistant_system_prompt(
+            bool(kb_ids), memories_note, container.settings.sandbox_enabled
+        ),
         max_steps=container.settings.agent_max_steps,
         token_budget=container.settings.agent_token_budget,
         temperature=container.settings.llm_temperature,
@@ -106,7 +124,7 @@ async def _build_custom(
 
     tools: list[Tool] = []
     for name in cfg.tools or []:
-        if name == "python_execute":
+        if name == "python_execute" and container.settings.sandbox_enabled:
             tools.append(_sandbox_tool(container))
         elif name in _TOOL_MAP:
             tools.append(_TOOL_MAP[name])
@@ -134,7 +152,9 @@ def _build_team(
     container: Container, kb_ids: list[str], memories_note: str, extra_tools: list[Tool] | None = None
 ) -> Agent:
     """团队模式：Supervisor 委派检索/调研/计算三类专家（多 Agent 演示）。"""
-    coder_tools: list[Tool] = [_sandbox_tool(container), calculator, *(extra_tools or [])]
+    coder_tools: list[Tool] = [calculator, *(extra_tools or [])]
+    if container.settings.sandbox_enabled:
+        coder_tools.insert(0, _sandbox_tool(container))
     workers = [
         WorkerSpec(
             name="web_researcher",
@@ -150,12 +170,20 @@ def _build_team(
         ),
         WorkerSpec(
             name="coder",
-            description="计算与数据处理专家：编写并执行 Python 代码/计算器完成计算、统计与验证",
+            description=(
+                "计算与数据处理专家：使用 Python/计算器完成计算、统计与验证"
+                if container.settings.sandbox_enabled
+                else "计算专家：使用安全计算器完成精确计算与验证"
+            ),
             build=lambda: Agent(
                 name="coder",
                 llm=container.llm,
                 tools=ToolRegistry(coder_tools),
-                system_prompt="你是计算专家，用 calculator 或 python_execute 完成计算并核对结果，输出结论。",
+                system_prompt=(
+                    "你是计算专家，用 calculator 或 python_execute 完成计算并核对结果，输出结论。"
+                    if container.settings.sandbox_enabled
+                    else "你是计算专家，用 calculator 完成计算并核对结果，输出结论。"
+                ),
                 max_steps=3,
                 stream_final=False,
             ),
@@ -188,19 +216,21 @@ def _build_team(
     return sup
 
 
-async def load_history(container: Container, session_id: str) -> list[Message]:
+async def _load_history_rows(
+    container: Container,
+    session_id: str,
+    after: datetime | None = None,
+) -> list[ChatMessage]:
     async with container.sessions() as db:
-        rows = (
-            (
-                await db.execute(
-                    select(ChatMessage)
-                    .where(ChatMessage.session_id == session_id)
-                    .order_by(ChatMessage.created_at)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        stmt = select(ChatMessage).where(ChatMessage.session_id == session_id)
+        if after is not None:
+            stmt = stmt.where(ChatMessage.created_at > after)
+        rows = (await db.execute(stmt.order_by(ChatMessage.created_at, ChatMessage.id))).scalars().all()
+    return list(rows)
+
+
+async def load_history(container: Container, session_id: str) -> list[Message]:
+    rows = await _load_history_rows(container, session_id)
     return [Message(role=Role(r.role), content=r.content) for r in rows]
 
 
@@ -261,6 +291,40 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             if custom_cfg is not None:
                 ctx.kb_ids = list(custom_cfg.kb_ids or [])
         cache_scope = chat_session.custom_agent_id or chat_session.agent_type
+        async with container.sessions() as db:
+            kb_rows = (
+                await db.execute(
+                    select(KnowledgeBase.id, KnowledgeBase.updated_at).where(
+                        KnowledgeBase.id.in_(ctx.kb_ids)
+                    )
+                )
+            ).all() if ctx.kb_ids else []
+        kb_revision = ",".join(
+            f"{kb_id}:{updated_at.isoformat()}" for kb_id, updated_at in sorted(kb_rows)
+        )
+        if custom_cfg is not None:
+            agent_revision = hashlib.sha256(
+                json.dumps(
+                    {
+                        "prompt": custom_cfg.system_prompt,
+                        "tools": custom_cfg.tools,
+                        "kb_ids": custom_cfg.kb_ids,
+                        "max_steps": custom_cfg.max_steps,
+                        "temperature": custom_cfg.temperature,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()[:16]
+        else:
+            agent_revision = "builtin-agent-v2"
+        cache_revision = f"{agent_revision}|{kb_revision}"
+        cache_kwargs = {
+            "user_id": ctx.user_id or "",
+            "model": f"{container.llm.provider}/{container.llm.model}",
+            "embedding_model": f"{container.embeddings.provider}/{container.embeddings.model}",
+            "revision": cache_revision,
+        }
 
         # 0) 输入护栏：注入检测 + 内容审核，命中即拒绝，不进入 Agent
         guard_in = container.guardrails.check_input(user_message)
@@ -276,10 +340,24 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             return
 
         # 1) 语义缓存：相似问题直接复用历史答案
-        cached = await container.semantic_cache.lookup(cache_scope, ctx.kb_ids, user_message)
+        query_embedding: list[float] | None = None
+        cached = None
+        cache_query_allowed = _cacheable_query(user_message)
+        if cache_query_allowed and container.semantic_cache.enabled:
+            try:
+                query_embedding = await container.embeddings.embed_one(user_message)
+                cached = await container.semantic_cache.lookup(
+                    cache_scope,
+                    ctx.kb_ids,
+                    user_message,
+                    query_embedding=query_embedding,
+                    **cache_kwargs,
+                )
+            except Exception as e:  # noqa: BLE001 缓存失败不阻断主链路
+                logger.warning("语义缓存查询失败: %s", e)
         if cached is not None:
             yield CacheHit(similarity=cached.similarity)
-            answer = cached.answer
+            answer = sanitize_invalid_citations(cached.answer, cached.sources)
             if container.settings.guardrails_mask_pii:
                 answer = container.guardrails.check_output(answer).text
             yield AssistantMessage(content=answer, final=True)
@@ -295,22 +373,36 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
         ltm = LongTermMemory(container.memory_store, container.embeddings, container.llm)
         memories: list[str] = []
         try:
-            memories = await ltm.retrieve(ctx.user_id or "", user_message, k=4)
+            memories = await ltm.retrieve(
+                ctx.user_id or "",
+                user_message,
+                k=4,
+                query_embedding=query_embedding,
+            )
         except Exception as e:  # noqa: BLE001 记忆失败不阻断对话
             logger.warning("长期记忆召回失败: %s", e)
 
-        history = await load_history(container, chat_session.id)
+        history_rows = await _load_history_rows(
+            container,
+            chat_session.id,
+            chat_session.summary_through_at,
+        )
+        history = [Message(role=Role(row.role), content=row.content) for row in history_rows]
         conv_memory = ConversationMemory(
             container.llm, token_budget=container.settings.chat_history_token_budget
         )
         prepared, new_summary = await conv_memory.prepare(history, chat_session.summary or "")
+        summary_through_at = chat_session.summary_through_at
+        if conv_memory.did_compact:
+            summary_through_at = history_rows[-conv_memory.keep_recent - 1].created_at
 
         # 3) 装配工具（内置 + 自定义 HTTP + MCP）并执行
         extra_tools: list[Tool] = list(container.mcp.tools)
-        try:
-            extra_tools += await load_custom_tools(container.sessions, ctx.user_id or "")
-        except Exception as e:  # noqa: BLE001
-            logger.warning("加载自定义工具失败: %s", e)
+        if container.settings.custom_http_tools_enabled:
+            try:
+                extra_tools += await load_custom_tools(container.sessions, ctx.user_id or "")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("加载自定义工具失败: %s", e)
 
         memories_note = render_memories(memories)
         agent: Agent | None = None
@@ -323,6 +415,7 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             agent = builder(container, ctx.kb_ids, memories_note, extra_tools)
 
         final_text = ""
+        citation_cacheable = True
         async for ev in agent.run(prepared, ctx):
             if isinstance(ev, RunFinished):
                 final_text = str(ev.output.get("text", ""))
@@ -334,6 +427,23 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
                         stage="output", verdict="allow", categories=["pii:" + ",".join(guard_out.pii_types)],
                         detail="已对输出中的敏感信息脱敏",
                     )
+                source_registry: list[dict] = ctx.state.get("sources", [])
+                citation_audit = audit_citations(
+                    final_text,
+                    source_registry,
+                    require_citations=bool(ctx.kb_ids and source_registry),
+                )
+                if citation_audit.invalid_ids:
+                    citation_cacheable = False
+                    final_text = sanitize_invalid_citations(final_text, source_registry)
+                    yield GuardrailTriggered(
+                        stage="output",
+                        verdict="allow",
+                        categories=["citation_integrity"],
+                        detail="已将不存在的引用编号降级为无效来源提示",
+                    )
+                if ctx.kb_ids and source_registry and not citation_audit.passed:
+                    citation_cacheable = False
                 sources = cited_sources(final_text, ctx.state)
                 ev.output["text"] = final_text
                 ev.output["sources"] = sources
@@ -342,8 +452,10 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             else:
                 yield ev
 
-        # 4) 写入语义缓存（仅缓存成功的实质回答）
-        if final_text.strip():
+        # 4) 写入语义缓存（仅缓存成功、非个性化的实质回答）
+        # 注入了长期记忆的回答带有用户画像，会随记忆演化而过期，不进共享缓存。
+        personalized = bool(memories)
+        if final_text.strip() and citation_cacheable and cache_query_allowed and not personalized:
             try:
                 await container.semantic_cache.store(
                     cache_scope,
@@ -351,6 +463,8 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
                     user_message,
                     final_text,
                     cited_sources(final_text, ctx.state),
+                    query_embedding=query_embedding,
+                    **cache_kwargs,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("写入语义缓存失败: %s", e)
@@ -371,7 +485,11 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             await db.execute(
                 update(ChatSession)
                 .where(ChatSession.id == chat_session.id)
-                .values(summary=new_summary, updated_at=datetime.now(UTC))
+                .values(
+                    summary=new_summary,
+                    summary_through_at=summary_through_at,
+                    updated_at=datetime.now(UTC),
+                )
             )
             await db.commit()
 

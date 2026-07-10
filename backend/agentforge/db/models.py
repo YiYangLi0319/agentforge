@@ -55,6 +55,7 @@ class ApiKey(Base):
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
+    __table_args__ = (Index("ix_chat_sessions_user_updated", "user_id", "updated_at"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -63,6 +64,7 @@ class ChatSession(Base):
     custom_agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     kb_ids: Mapped[list] = mapped_column(JSON, default=list)
     summary: Mapped[str] = mapped_column(Text, default="")  # 滚动压缩摘要（短期记忆）
+    summary_through_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -71,6 +73,7 @@ class ChatSession(Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
+    __table_args__ = (Index("ix_chat_messages_session_created", "session_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     session_id: Mapped[str] = mapped_column(
@@ -87,6 +90,7 @@ class Run(Base):
     """一次 Agent 执行（chat 轮次 / research 任务），事件溯源的聚合根。"""
 
     __tablename__ = "runs"
+    __table_args__ = (Index("ix_runs_user_created", "user_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -176,7 +180,10 @@ class Document(Base):
 
 class Chunk(Base):
     __tablename__ = "chunks"
-    __table_args__ = (Index("ix_chunks_kb_id_doc", "kb_id", "document_id"),)
+    __table_args__ = (
+        Index("ix_chunks_kb_id_doc", "kb_id", "document_id"),
+        Index("ix_chunks_document_seq", "document_id", "seq"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
@@ -206,6 +213,10 @@ class MemoryEntry(Base):
 
 class ResearchReport(Base):
     __tablename__ = "research_reports"
+    __table_args__ = (
+        Index("ix_research_reports_user_created", "user_id", "created_at"),
+        Index("ix_research_reports_status", "status"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     run_id: Mapped[str] = mapped_column(String(32), index=True)
@@ -224,7 +235,6 @@ class SemanticCacheEntry(Base):
     """语义缓存条目：按 scope（知识库+Agent 类型）隔离，向量相似即命中。"""
 
     __tablename__ = "semantic_cache_entries"
-    __table_args__ = (Index("ix_cache_scope", "scope_key"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     scope_key: Mapped[str] = mapped_column(String(64), index=True)

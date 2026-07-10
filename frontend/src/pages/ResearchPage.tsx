@@ -1,6 +1,8 @@
 import {
   CheckCircle2,
+  CircleStop,
   ClipboardList,
+  Download,
   History,
   Loader2,
   RefreshCw,
@@ -27,6 +29,19 @@ interface WorkerState {
   evidence_count?: number;
 }
 
+const PHASE_LABEL: Record<string, string> = {
+  planning: "正在拆解研究问题",
+  searching: "搜索员正在并行检索并阅读原文",
+  synthesizing: "正在交叉验证证据与冲突",
+  writing: "正在撰写研究报告",
+  reviewing: "评审员正在核验引用与论证",
+  revising: "正在按评审意见修订",
+  completed: "研究已完成并通过质量门",
+  needs_review: "已生成最佳版本，但未通过发布质量门",
+  interrupted: "服务重启，任务已中断",
+  cancelled: "任务已取消",
+};
+
 export default function ResearchPage() {
   const [query, setQuery] = useState("");
   const [running, setRunning] = useState(false);
@@ -39,16 +54,36 @@ export default function ResearchPage() {
   const [history, setHistory] = useState<ResearchReportInfo[]>([]);
   const [viewing, setViewing] = useState<string | null>(null);
   const [shareUrl, setShareUrl] = useState("");
+  const [runId, setRunId] = useState<string | null>(null);
+  const [phase, setPhase] = useState("");
+  const [progress, setProgress] = useState({ completed: 0, total: 0, revision: 0 });
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyError, setHistoryError] = useState("");
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const abortRef = useRef<(() => void) | null>(null);
 
-  const loadHistory = useCallback(() => {
-    api.get<ResearchReportInfo[]>("/api/research").then(setHistory).catch(() => undefined);
+  const loadHistory = useCallback((search = "") => {
+    const suffix = search.trim() ? `?q=${encodeURIComponent(search.trim())}` : "";
+    api
+      .get<ResearchReportInfo[]>(`/api/research${suffix}`)
+      .then((rows) => {
+        setHistory(rows);
+        setHistoryError("");
+      })
+      .catch((reason) =>
+        setHistoryError(reason instanceof Error ? reason.message : "加载研究历史失败"),
+      );
   }, []);
 
   useEffect(() => {
     loadHistory();
     return () => abortRef.current?.();
   }, [loadHistory]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => loadHistory(historyQuery), 250);
+    return () => window.clearTimeout(timer);
+  }, [historyQuery, loadHistory]);
 
   const reset = () => {
     setPlan(null);
@@ -58,6 +93,9 @@ export default function ResearchPage() {
     setSources([]);
     setError("");
     setViewing(null);
+    setRunId(null);
+    setPhase("");
+    setProgress({ completed: 0, total: 0, revision: 0 });
   };
 
   const handleEvent = useCallback((ev: AgentEvent) => {
@@ -66,10 +104,14 @@ export default function ResearchPage() {
         if (ev.plan) setPlan(ev.plan);
         break;
       case "research_task_started":
-        setWorkers((w) => [
-          ...w,
-          { task_id: ev.task_id!, title: ev.title ?? "", agent: ev.agent, status: "running" },
-        ]);
+        setWorkers((items) =>
+          items.some((item) => item.task_id === ev.task_id)
+            ? items
+            : [
+                ...items,
+                { task_id: ev.task_id!, title: ev.title ?? "", agent: ev.agent, status: "running" },
+              ],
+        );
         break;
       case "research_task_finished":
         setWorkers((w) =>
@@ -88,7 +130,14 @@ export default function ResearchPage() {
         break;
       case "report_review":
         setReview({ passed: ev.passed ?? true, scores: ev.scores ?? {}, feedback: ev.feedback ?? "" });
-        if (ev.passed === false) setReportText("");
+        break;
+      case "research_phase_changed":
+        setPhase(ev.phase ?? "");
+        setProgress({
+          completed: ev.completed_tasks ?? 0,
+          total: ev.total_tasks ?? 0,
+          revision: ev.revision ?? 0,
+        });
         break;
       case "sources_updated":
         if (ev.sources) setSources(ev.sources);
@@ -97,10 +146,16 @@ export default function ResearchPage() {
         if (ev.output?.report) setReportText(String(ev.output.report));
         if (ev.output?.sources) setSources(ev.output.sources);
         setRunning(false);
+        setPhase(ev.output?.quality_passed === false ? "needs_review" : "completed");
         break;
       case "run_failed":
         setError(ev.error ?? "研究任务失败");
         setRunning(false);
+        break;
+      case "run_cancelled":
+        setError("研究任务已取消");
+        setRunning(false);
+        setPhase("cancelled");
         break;
     }
   }, []);
@@ -112,9 +167,14 @@ export default function ResearchPage() {
     setRunning(true);
     try {
       const resp = await api.post<{ run_id: string; report_id: string }>("/api/research", { query: q });
+      setRunId(resp.run_id);
+      setViewing(resp.report_id);
       abortRef.current = streamRunEvents(resp.run_id, {
         onEvent: handleEvent,
-        onDone: loadHistory,
+        onDone: () => {
+          setRunning(false);
+          loadHistory();
+        },
         onError: () => {
           setRunning(false);
           setError("事件流中断，可稍后在历史记录中查看结果");
@@ -131,7 +191,7 @@ export default function ResearchPage() {
     try {
       const r = await api.post<{ path: string }>(`/api/research/${viewing}/share`, {});
       const url = `${location.origin}${r.path}`;
-      await navigator.clipboard.writeText(url).catch(() => undefined);
+      await navigator.clipboard.writeText(url);
       setShareUrl(url);
     } catch (e) {
       setError(e instanceof Error ? e.message : "分享失败");
@@ -143,24 +203,72 @@ export default function ResearchPage() {
     reset();
     setViewing(id);
     setShareUrl("");
-    const r = await api.get<ResearchReportInfo>(`/api/research/${id}`);
-    setPlan(r.plan && r.plan.sub_questions ? r.plan : null);
-    setReportText(r.report_md ?? "");
-    setSources(r.sources ?? []);
-    // 历史里存的是扁平结构（passed/completeness/citation_quality/logic），
-    // 转换成组件需要的嵌套 scores 结构，避免 review.scores 为空导致渲染崩溃
-    const rv = r.review as Record<string, unknown> | undefined;
-    if (rv && "passed" in rv) {
-      const scores = (rv.scores as Record<string, number>) ?? {
-        completeness: rv.completeness as number,
-        citation_quality: rv.citation_quality as number,
-        logic: rv.logic as number,
-      };
-      setReview({
-        passed: Boolean(rv.passed),
-        scores,
-        feedback: (rv.feedback as string) ?? "",
-      });
+    setLoadingHistory(true);
+    try {
+      const r = await api.get<ResearchReportInfo>(`/api/research/${id}`);
+      setRunId(r.run_id);
+      setPlan(r.plan && r.plan.sub_questions ? r.plan : null);
+      setReportText(r.report_md ?? "");
+      setSources(r.sources ?? []);
+      // 历史里存的是扁平结构（passed/completeness/citation_quality/logic），
+      // 转换成组件需要的嵌套 scores 结构，避免 review.scores 为空导致渲染崩溃
+      const rv = r.review as Record<string, unknown> | undefined;
+      if (rv && "passed" in rv) {
+        const scores = (rv.scores as Record<string, number>) ?? {
+          completeness: rv.completeness as number,
+          citation_quality: rv.citation_quality as number,
+          logic: rv.logic as number,
+        };
+        setReview({
+          passed: Boolean(rv.passed),
+          scores,
+          feedback: (rv.feedback as string) ?? "",
+        });
+      }
+      if (["pending", "running", "awaiting_approval", "resuming"].includes(r.status)) {
+        setRunning(true);
+        abortRef.current = streamRunEvents(r.run_id, {
+          onEvent: handleEvent,
+          onDone: () => {
+            setRunning(false);
+            loadHistory();
+          },
+          onError: () => {
+            setRunning(false);
+            setError("事件流恢复失败，请稍后重试");
+          },
+        });
+      } else {
+        setPhase(r.status);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "加载研究报告失败");
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
+  const cancelResearch = async () => {
+    if (!runId) return;
+    try {
+      await api.post(`/api/runs/${runId}/cancel`, {});
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "取消失败");
+    }
+  };
+
+  const exportResearch = async () => {
+    if (!viewing) return;
+    try {
+      const { blob, filename } = await api.download(`/api/research/${viewing}/export`);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "导出失败");
     }
   };
 
@@ -168,22 +276,45 @@ export default function ResearchPage() {
     <div className="flex h-full">
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 输入区 */}
-        <div className="border-b border-zinc-800/80 px-6 py-4">
-          <div className="mx-auto flex max-w-4xl gap-2">
+        <div className="border-b border-zinc-800/80 px-3 py-3 sm:px-6 sm:py-4">
+          <div className="mx-auto flex max-w-4xl flex-wrap gap-2">
+            <label htmlFor="research-query" className="sr-only">
+              研究主题
+            </label>
             <input
+              id="research-query"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && start()}
               placeholder="输入研究主题，例如：2026 年国产大模型在企业落地的竞争格局分析"
-              className="flex-1 rounded-xl border border-zinc-700/80 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50 focus:outline-none"
+              className="min-w-0 flex-1 rounded-xl border border-zinc-700/80 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50 focus:outline-none"
             />
-            <Button onClick={start} disabled={query.trim().length < 4} loading={running}>
-              <SendHorizonal size={15} /> 开始研究
-            </Button>
+            {running ? (
+              <Button variant="danger" onClick={cancelResearch}>
+                <CircleStop size={15} /> 停止
+              </Button>
+            ) : (
+              <Button onClick={start} disabled={query.trim().length < 4}>
+                <SendHorizonal size={15} /> 开始研究
+              </Button>
+            )}
+            <select
+              value={viewing ?? ""}
+              onChange={(event) => event.target.value && openHistory(event.target.value)}
+              aria-label="选择历史研究"
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-300 lg:hidden"
+            >
+              <option value="">选择历史研究…</option>
+              {history.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.query}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-5">
           <div className="mx-auto max-w-4xl space-y-4">
             {!plan && !running && !reportText && !error && !viewing && (
               <EmptyState
@@ -200,8 +331,26 @@ export default function ResearchPage() {
             )}
 
             {error && (
-              <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
+              <div role="alert" className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
                 {error}
+              </div>
+            )}
+
+            {(phase || loadingHistory) && (
+              <div
+                aria-live="polite"
+                className="flex items-center gap-2 rounded-xl border border-indigo-500/25 bg-indigo-500/8 px-4 py-3 text-sm text-indigo-200"
+              >
+                {(running || loadingHistory) && <Loader2 size={15} className="animate-spin" />}
+                <span>{loadingHistory ? "正在恢复研究现场…" : (PHASE_LABEL[phase] ?? phase)}</span>
+                {phase === "searching" && progress.total > 0 && (
+                  <Badge tone="indigo">
+                    {progress.completed}/{progress.total}
+                  </Badge>
+                )}
+                {phase === "revising" && progress.revision > 0 && (
+                  <Badge tone="indigo">第 {progress.revision} 轮</Badge>
+                )}
               </div>
             )}
 
@@ -277,9 +426,14 @@ export default function ResearchPage() {
             {/* 分享（仅查看历史且有报告时） */}
             {viewing && reportText && !running && (
               <div className="flex items-center gap-2">
-                <Button size="sm" variant="outline" onClick={doShare}>
-                  <Share2 size={13} /> 生成公开分享链接
+                <Button size="sm" variant="outline" onClick={exportResearch}>
+                  <Download size={13} /> 导出 Markdown
                 </Button>
+                {(phase === "completed" || phase === "succeeded") && (
+                  <Button size="sm" variant="outline" onClick={doShare}>
+                    <Share2 size={13} /> 生成公开分享链接
+                  </Button>
+                )}
                 {shareUrl && (
                   <a
                     href={shareUrl}
@@ -300,7 +454,7 @@ export default function ResearchPage() {
                   <Markdown content={reportText} sources={sources} streaming={running} />
                 ) : (
                   <div className="flex items-center gap-2 text-sm text-zinc-500">
-                    <Loader2 size={15} className="animate-spin" /> 搜索员正在并行调研，稍后开始撰写报告…
+                    <Loader2 size={15} className="animate-spin" /> {PHASE_LABEL[phase] ?? "研究任务正在执行…"}
                   </div>
                 )}
               </div>
@@ -310,10 +464,21 @@ export default function ResearchPage() {
       </div>
 
       {/* 历史记录 */}
-      <div className="flex w-72 shrink-0 flex-col border-l border-zinc-800/80">
+      <div className="hidden w-72 shrink-0 flex-col border-l border-zinc-800/80 lg:flex">
         <div className="flex items-center gap-1.5 border-b border-zinc-800/80 px-4 py-3 text-xs font-medium tracking-wide text-zinc-400">
           <History size={13} /> 研究历史
         </div>
+        <label className="relative mx-2 mt-2 block">
+          <span className="sr-only">搜索研究历史</span>
+          <Search size={13} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-zinc-600" />
+          <input
+            value={historyQuery}
+            onChange={(event) => setHistoryQuery(event.target.value)}
+            placeholder="搜索研究主题…"
+            className="w-full rounded-lg border border-zinc-800 bg-zinc-900 py-2 pr-2 pl-8 text-xs text-zinc-300 placeholder:text-zinc-600 focus:border-indigo-500 focus:outline-none"
+          />
+        </label>
+        {historyError && <div className="px-3 py-2 text-xs text-rose-400">{historyError}</div>}
         <div className="flex-1 space-y-1 overflow-y-auto p-2">
           {history.length === 0 && (
             <div className="px-3 py-6 text-center text-xs text-zinc-600">暂无历史研究</div>

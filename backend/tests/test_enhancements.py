@@ -44,6 +44,10 @@ async def _sessions(tmp_path):
 def test_scope_key_isolation():
     assert scope_key("assistant", ["kb1"]) != scope_key("team", ["kb1"])
     assert scope_key("assistant", ["a", "b"]) == scope_key("assistant", ["b", "a"])  # 顺序无关
+    assert scope_key("assistant", [], user_id="u1") != scope_key("assistant", [], user_id="u2")
+    assert scope_key("assistant", ["kb1"], revision="v1") != scope_key(
+        "assistant", ["kb1"], revision="v2"
+    )
 
 
 async def test_semantic_cache_hit_and_miss(tmp_path):
@@ -112,6 +116,20 @@ async def test_compress_context_extracts_relevant():
     ]
     out = await compress_context(llm, "报销时限", chunks)
     assert len(out) == 1 and out[0].content == "报销单必须在30天内提交。"
+
+
+async def test_compress_context_rejects_generated_extract():
+    from agentforge.rag.retriever import RetrievedChunk
+
+    chunk = RetrievedChunk(
+        chunk_id="c1",
+        document_id="d",
+        kb_id="k",
+        content="原文只说明需要提交报销单。",
+    )
+    llm = MockChatModel(script=['{"relevant": true, "extract": "报销必须在30天内提交。"}'])
+    out = await compress_context(llm, "报销时限", [chunk])
+    assert out[0].content == chunk.content
 
 
 async def test_rag_pipeline_parent_child(tmp_path):

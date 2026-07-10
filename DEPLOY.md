@@ -23,14 +23,17 @@ git push -u origin main
 
 | 变量 | 值 | 说明 |
 | --- | --- | --- |
-| `SECRET_KEY` | 一段随机长字符串 | JWT 签名，务必自定义 |
+| `AGENTFORGE_ENV` | `prod` | 启用生产安全门禁 |
+| `SECRET_KEY` | 至少 32 位随机字符串 | JWT 签名；默认值/短密钥会拒绝启动 |
 | `LLM_PROVIDER` | `deepseek` | 对话模型厂商 |
 | `LLM_API_KEY` | `sk-你的DeepSeekKey` | **必填** |
 | `LLM_MODEL` | `deepseek-chat` | |
 | `EMBEDDING_PROVIDER` | `mock` | 无 embedding key 时保持 mock |
 | `SEARCH_PROVIDER` | `auto` | 深度研究联网搜索 |
-| `DATABASE_URL` | `sqlite+aiosqlite:///./agentforge.db` | 免费档用 SQLite；要持久化见下方 |
+| `DATABASE_URL` | 平台 PostgreSQL 连接串 | 生产必须使用持久化数据库 |
 | `REGISTRATION_INVITE_CODE` | 自定义一段口令 | **公开部署强烈建议设置**：只有知道邀请码的人能注册，防止陌生人消耗你的模型额度 |
+| `SANDBOX_ENABLED` | `false` | 宿主级 Python 子进程不是生产沙箱，生产会强制拒绝开启 |
+| `CUSTOM_HTTP_TOOLS_ENABLED` | `false` | 公网环境默认关闭用户自定义出口请求 |
 
 > 端口无需设置：PaaS 会注入 `$PORT`，镜像已自动适配。
 
@@ -75,22 +78,31 @@ git push -u origin main
 
 `render.yaml` 蓝图**已自动创建一个免费 Render PostgreSQL** 并注入 `DATABASE_URL`，数据持久化、重新部署不丢失（账号、知识库、历史都保留）。
 
-- 应用会自动把 Render 的连接串（`postgres://...`）规范化为 asyncpg 驱动，并在启动时建表、启用 `pgvector` 扩展。
+- 镜像启动时先执行 `alembic upgrade head`，再启动单 worker API；应用不会在生产进程里用 `create_all` 偷改 schema。
+- 应用会把 `postgres://...` 规范化为 asyncpg 驱动；能启用 pgvector 时使用原生向量列，否则在建库时固定为 JSON 降级模式，后续启动不会自动翻转物理列类型。
 - 若用 Railway/Zeabur：在平台加一个 PostgreSQL 服务，把它的连接串填到 `DATABASE_URL` 即可（`postgres://` 或 `postgresql://` 都会被自动识别）。
 - 不想用 Postgres 也可改回 `DATABASE_URL=sqlite+aiosqlite:///./agentforge.db`（但免费档文件系统临时，会随重部署清空）。
-
-> Render 免费 PostgreSQL 有效期约 90 天，到期需在面板续期或新建。
 
 ## 五、上线后注意
 
 - **成本**：站点公开后，所有访客用的是**你的 DeepSeek 额度**。演示完可在平台暂停服务或删除域名。
 - **安全**：设置了 `REGISTRATION_INVITE_CODE` 后，只有知道邀请码的人才能注册（登录页会自动出现邀请码输入框）。把邀请码只发给你信任的人即可。
+- **扩容约束**：当前事件总线、审批 Future 与任务所有权位于进程内，请保持 **1 个副本、1 个 Uvicorn worker**；不要在平台面板开启横向扩容。
+- **探针**：平台健康检查使用 `/api/readyz`（数据库与迁移版本），`/api/livez` 仅检查进程存活。
+- **中断恢复**：实例异常重启后，遗留任务会标记为 `interrupted`；带 checkpoint 的 chat 可手动恢复，研究任务不会自动重放有副作用的工具。
 - **首次访问**：注册账号 → 知识库页「导入演示样例」→ 即可体验带引用的问答与深度研究。
 
 ## 六、本地用 Docker 跑同款镜像（自测）
 
 ```bash
 docker build -t agentforge:latest .
-docker run --rm -p 8080:8000 -e PORT=8000 -e LLM_PROVIDER=deepseek -e LLM_API_KEY=sk-xxx -e SECRET_KEY=any-long-random .
+docker run --rm -p 8080:8000 \
+  -e PORT=8000 \
+  -e AGENTFORGE_ENV=prod \
+  -e LLM_PROVIDER=deepseek \
+  -e LLM_API_KEY=sk-xxx \
+  -e SECRET_KEY=replace-with-at-least-32-random-characters \
+  -e DATABASE_URL=postgresql://user:pass@host/db \
+  -e SANDBOX_ENABLED=false .
 # 浏览器打开 http://127.0.0.1:8080
 ```

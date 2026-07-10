@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentforge.api.app import Container
@@ -11,6 +11,7 @@ from agentforge.api.sse import sse_response
 from agentforge.core.runtime import RunContext
 from agentforge.db.models import Run, User
 from agentforge.services.chat import make_resume_factory
+from agentforge.services.runs import RunLimitExceeded
 
 router = APIRouter()
 
@@ -107,15 +108,39 @@ async def resume_run(
         raise HTTPException(status_code=409, detail="运行仍在进行中，无需恢复")
     if run.kind != "chat":
         raise HTTPException(status_code=400, detail="仅支持恢复 chat 类型的运行")
-    if run.status not in ("running", "awaiting_approval") or not (run.checkpoint or {}).get("messages"):
+    if run.status != "interrupted" or not (run.checkpoint or {}).get("messages"):
         raise HTTPException(status_code=409, detail="该运行不满足恢复条件（无 checkpoint 或已结束）")
 
-    new_run_id = await container.run_manager.start(
-        user_id=user.id,
-        kind="chat",
-        input={**run.input, "resumed_from": run_id},
-        session_id=run.session_id,
-        ctx=RunContext(),
-        factory=make_resume_factory(container, run),
+    claimed = await db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status == "interrupted")
+        .values(status="resuming")
     )
+    if getattr(claimed, "rowcount", 0) != 1:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="该运行已被其他请求恢复")
+    await db.commit()
+    try:
+        new_run_id = await container.run_manager.start(
+            user_id=user.id,
+            kind="chat",
+            input={**run.input, "resumed_from": run_id},
+            session_id=run.session_id,
+            ctx=RunContext(),
+            factory=make_resume_factory(container, run),
+        )
+    except RunLimitExceeded as exc:
+        await db.execute(update(Run).where(Run.id == run_id).values(status="interrupted"))
+        await db.commit()
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except Exception as exc:  # 启动失败必须归还 interrupted，否则将永久卡在 resuming
+        await db.execute(update(Run).where(Run.id == run_id).values(status="interrupted"))
+        await db.commit()
+        raise HTTPException(status_code=500, detail="恢复失败，请稍后重试") from exc
+    await db.execute(
+        update(Run)
+        .where(Run.id == run_id)
+        .values(status="resumed", output={"resumed_as": new_run_id})
+    )
+    await db.commit()
     return {"run_id": new_run_id, "resumed_from": run_id}

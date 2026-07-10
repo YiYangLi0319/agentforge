@@ -22,16 +22,11 @@ class BrokenProvider(SearchProvider):
 
 
 async def test_search_fallback_chain_and_sources():
-    provider = FallbackSearchProvider([BrokenProvider()])  # 全部失败 -> Mock 兜底
+    provider = FallbackSearchProvider([BrokenProvider()])  # 全部失败 -> 空结果，不能伪造来源
     ctx = ToolContext(services={"search": provider})
     result = await web_search.execute({"query": "AgentForge 是什么", "max_results": 3}, ctx)
-    assert result.ok and "example.com" in result.content
-    assert result.content.startswith("[1]")  # 带全局引用编号
-    assert len(ctx.state["sources"]) == 3
-
-    # 再搜一次相同结果不重复累积（编号复用）
-    await web_search.execute({"query": "AgentForge 是什么", "max_results": 3}, ctx)
-    assert len(ctx.state["sources"]) == 3
+    assert result.ok and "没有找到" in result.content
+    assert ctx.state.get("sources", []) == []
 
 
 async def test_mock_search_deterministic():
@@ -75,6 +70,23 @@ async def test_web_fetch_parses_html(monkeypatch):
     monkeypatch.setattr("agentforge.core.tools.web_fetch.httpx.AsyncClient", fake_client)
     result = await web_fetch.execute({"url": "http://93.184.216.34/page"}, ToolContext())
     assert result.ok and "hello world" in result.content
+
+
+async def test_web_fetch_does_not_follow_redirects(monkeypatch):
+    real_client = httpx.AsyncClient
+
+    def fake_client(**kwargs):
+        kwargs.pop("transport", None)
+        return real_client(
+            transport=httpx.MockTransport(
+                lambda req: httpx.Response(302, headers={"location": "http://127.0.0.1/admin"})
+            ),
+            **kwargs,
+        )
+
+    monkeypatch.setattr("agentforge.core.tools.web_fetch.httpx.AsyncClient", fake_client)
+    result = await web_fetch.execute({"url": "http://93.184.216.34/redirect"}, ToolContext())
+    assert not result.ok and "重定向" in result.content
 
 
 async def test_python_sandbox_success_and_error():

@@ -14,11 +14,21 @@ def register_source(
     document_id: str = "",
     filename: str = "",
     heading: str = "",
+    verified: bool = False,
+    evidence: str = "",
 ) -> int:
     """登记来源并返回编号（从 1 开始）；同一 url/chunk 去重复用编号。"""
     sources: list[dict] = state.setdefault("sources", [])
     for s in sources:
         if (url and s.get("url") == url) or (chunk_id and s.get("chunk_id") == chunk_id):
+            if verified:
+                s["verified"] = True
+                if title:
+                    s["title"] = title[:200]
+                if snippet:
+                    s["snippet"] = snippet[:300]
+                if evidence:
+                    s["evidence"] = evidence[:4000]
             return int(s["id"])
     new_id = len(sources) + 1
     sources.append(
@@ -32,6 +42,8 @@ def register_source(
             "document_id": document_id,
             "filename": filename,
             "heading": heading,
+            "verified": verified,
+            "evidence": evidence[:4000],
         }
     )
     return new_id

@@ -1,10 +1,12 @@
 """FastAPI 应用工厂：装配依赖容器（LLM/Embedding/RunManager/限流器）与路由。"""
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,11 +54,16 @@ class Container:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate_runtime()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         engine = build_engine(settings.database_url)
-        await init_db(engine, use_pgvector=settings.use_pgvector)
+        await init_db(
+            engine,
+            use_pgvector=settings.use_pgvector,
+            create_schema=not settings.is_production,
+        )
         sessions = build_sessionmaker(engine)
 
         from agentforge.core.guardrails import GuardrailsEngine
@@ -70,7 +77,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from agentforge.services.semantic_cache import SemanticCache
 
         chat_llm = build_chat_model(settings)
+        judge_llm = build_judge_model(settings)
         embeddings = build_embeddings(settings)
+        run_manager = RunManager(
+            sessions,
+            max_concurrent=settings.max_concurrent_runs,
+            max_per_user=settings.max_concurrent_runs_per_user,
+            max_per_session=settings.max_concurrent_runs_per_session,
+        )
+        await run_manager.recover_interrupted()
         mcp = MCPManager()
         if settings.mcp_config_path:
             try:
@@ -83,9 +98,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine=engine,
             sessions=sessions,
             llm=chat_llm,
-            judge_llm=build_judge_model(settings),
+            judge_llm=judge_llm,
             embeddings=embeddings,
-            run_manager=RunManager(sessions),
+            run_manager=run_manager,
             limiter=await build_limiter(settings),
             retriever=HybridRetriever(sessions, embeddings, build_reranker(settings)),
             search=build_search_provider(settings.tavily_api_key, settings.search_provider),
@@ -119,6 +134,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.run_manager.shutdown()
         await mcp.shutdown()
+        await _close_if_supported(container.limiter)
+        await _close_if_supported(embeddings)
+        if judge_llm is not chat_llm:
+            await _close_if_supported(judge_llm)
+        await _close_if_supported(chat_llm)
         await engine.dispose()
 
     app = FastAPI(
@@ -136,10 +156,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", "")[:128] or uuid4().hex
+        request.state.request_id = request_id
+        started = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            logger.info(
+                "request completed",
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                },
+            )
+
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
         logger.exception("未处理异常: %s %s", request.method, request.url.path)
-        return JSONResponse(status_code=500, content={"detail": f"服务器内部错误: {type(exc).__name__}"})
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "服务器内部错误",
+                "request_id": getattr(request.state, "request_id", ""),
+            },
+        )
 
     from agentforge.api.routers import (
         admin,
@@ -175,6 +224,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     _mount_frontend(app, settings)
     return app
+
+
+async def _close_if_supported(resource: object) -> None:
+    close = getattr(resource, "aclose", None)
+    if callable(close):
+        await close()
 
 
 def _mount_frontend(app: FastAPI, settings: Settings) -> None:

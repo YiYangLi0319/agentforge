@@ -3,13 +3,13 @@
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
-from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from agentforge.config import get_settings
-from agentforge.db.base import Base, normalize_db_url
 from agentforge.db import models  # noqa: F401  注册所有模型
+from agentforge.db.base import Base, normalize_db_url
+from alembic import context
 
 config = context.config
 

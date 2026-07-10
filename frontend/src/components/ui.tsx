@@ -97,8 +97,8 @@ export function Badge({
 
 export function statusTone(status: string): "green" | "red" | "amber" | "indigo" | "zinc" {
   if (status === "succeeded" || status === "ready") return "green";
-  if (status === "failed" || status === "cancelled") return "red";
-  if (status === "awaiting_approval") return "amber";
+  if (status === "failed" || status === "cancelled" || status === "interrupted") return "red";
+  if (status === "awaiting_approval" || status === "needs_review") return "amber";
   if (status === "running" || status === "processing" || status === "pending") return "indigo";
   return "zinc";
 }
@@ -112,6 +112,10 @@ export const STATUS_LABEL: Record<string, string> = {
   pending: "排队中",
   processing: "处理中",
   ready: "已就绪",
+  interrupted: "已中断",
+  needs_review: "待人工复核",
+  resumed: "已恢复",
+  resuming: "恢复中",
 };
 
 export function EmptyState({ icon, title, desc }: { icon: ReactNode; title: string; desc?: string }) {

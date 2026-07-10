@@ -1,5 +1,7 @@
 """认证路由：注册 / 登录 / 当前用户 / API Key 管理。"""
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -48,8 +50,13 @@ async def register(
     ).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=409, detail="用户名已被占用")
-    is_admin = bool(container.settings.admin_username) and body.username == container.settings.admin_username
-    user = User(username=body.username, password_hash=hash_password(body.password), is_admin=is_admin)
+    is_admin = (
+        bool(required_code)
+        and bool(container.settings.admin_username)
+        and body.username == container.settings.admin_username
+    )
+    password_hash = await asyncio.to_thread(hash_password, body.password)
+    user = User(username=body.username, password_hash=password_hash, is_admin=is_admin)
     db.add(user)
     await db.commit()
     token = create_access_token(user.id, container.settings.secret_key, container.settings.jwt_expire_hours)
@@ -65,7 +72,10 @@ async def login(
     user = (
         await db.execute(select(User).where(User.username == body.username))
     ).scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password_hash):
+    password_ok = user is not None and await asyncio.to_thread(
+        verify_password, body.password, user.password_hash
+    )
+    if user is None or not password_ok:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_access_token(user.id, container.settings.secret_key, container.settings.jwt_expire_hours)
     return TokenOut(access_token=token, user_id=user.id, username=user.username)
@@ -79,10 +89,6 @@ async def me(
 ) -> dict:
     from agentforge.services.quota import quota_status
 
-    # 管理员用户名在登录后可自动提权（兼容注册早于配置的情况）
-    if container.settings.admin_username and user.username == container.settings.admin_username and not user.is_admin:
-        user.is_admin = True
-        await db.commit()
     return {
         "user_id": user.id,
         "username": user.username,

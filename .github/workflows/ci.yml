@@ -33,7 +33,10 @@ jobs:
         run: pytest tests -q --cov=agentforge --cov-report=term-missing:skip-covered
 
       - name: Offline eval pipeline smoke
-        run: python -m agentforge.evals.runner retrieval
+        run: >-
+          python -m agentforge.evals.runner retrieval
+          --fail-under "recall@5=0.8"
+          --fail-under "mrr=0.7"
         env:
           DATABASE_URL: "sqlite+aiosqlite:///./ci_eval.db"
 

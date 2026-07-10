@@ -26,7 +26,13 @@ RUN pip install --no-cache-dir .
 # 前端构建产物 -> 后端同源托管目录
 COPY --from=frontend /web/dist ./static
 
+RUN groupadd --system agentforge \
+    && useradd --system --gid agentforge --home-dir /app agentforge \
+    && chown -R agentforge:agentforge /app
+
+USER agentforge
+
 EXPOSE 8000
 
-# PaaS 通过 $PORT 指定端口；本地默认 8000
-CMD ["sh", "-c", "uvicorn agentforge.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# 单实例启动：先执行版本化迁移，再启动 API。当前事件总线/审批所有权为进程内实现，不支持多 worker。
+CMD ["sh", "-c", "alembic upgrade head && uvicorn agentforge.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

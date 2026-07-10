@@ -1,6 +1,7 @@
 """数据库引擎与会话管理：PostgreSQL(生产) / SQLite(轻量与测试) 双支持。"""
 
 import json
+import logging
 from collections.abc import AsyncIterator
 
 from sqlalchemy import text
@@ -12,6 +13,10 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import StaticPool
+
+logger = logging.getLogger(__name__)
+
+CURRENT_SCHEMA_REVISION = "20260710_01"
 
 
 class Base(DeclarativeBase):
@@ -52,34 +57,74 @@ def build_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def init_db(engine: AsyncEngine, use_pgvector: bool = True) -> None:
+async def _configure_vector_storage(engine: AsyncEngine, use_pgvector: bool) -> None:
+    """按数据库实际列类型锁定向量后端，避免运行时在 JSON/vector 间错误翻转。"""
+    from agentforge.db.types import PGVECTOR
+
+    if engine.dialect.name != "postgresql":
+        PGVECTOR["enabled"] = False
+        return
+
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    """
+                    SELECT udt_name
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'chunks'
+                      AND column_name = 'embedding'
+                    """
+                )
+            )
+        ).first()
+        if row is not None:
+            PGVECTOR["enabled"] = row[0] == "vector"
+            if use_pgvector and not PGVECTOR["enabled"]:
+                logger.warning("现有 embedding 列为 JSON；本实例保持 JSON 检索，不会在启动时变更物理列类型")
+            return
+
+        enabled = False
+        if use_pgvector:
+            savepoint = await conn.begin_nested()
+            try:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                await savepoint.commit()
+                enabled = True
+            except Exception as exc:  # noqa: BLE001 托管 PostgreSQL 可能没有扩展权限
+                await savepoint.rollback()
+                logger.warning("pgvector 不可用，向量检索降级为 JSON+进程内计算：%s", exc)
+        PGVECTOR["enabled"] = enabled
+
+
+async def init_db(
+    engine: AsyncEngine,
+    use_pgvector: bool = True,
+    *,
+    create_schema: bool = True,
+) -> None:
     """初始化数据库（幂等）。
 
     PostgreSQL 上尝试启用 pgvector 扩展：成功则向量列用原生 vector；失败或被禁用
     则自动降级为 JSON 存储（兼容不带 pgvector 的托管 Postgres，如 Railway/Zeabur 默认库）。
     """
-    import logging
-
     from agentforge.db import models  # noqa: F401  确保模型已注册
-    from agentforge.db.types import PGVECTOR
 
-    logger = logging.getLogger(__name__)
+    await _configure_vector_storage(engine, use_pgvector)
+    if create_schema:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
-    if engine.dialect.name == "postgresql":
-        enabled = False
-        if use_pgvector:
-            try:
-                async with engine.begin() as conn:
-                    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                enabled = True
-            except Exception as e:  # noqa: BLE001 无 pgvector 权限/扩展则降级
-                logger.warning("pgvector 不可用，向量检索降级为 JSON+进程内计算：%s", e)
-        PGVECTOR["enabled"] = enabled
-    else:
-        PGVECTOR["enabled"] = False  # SQLite 等：JSON 存储
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+async def current_schema_revision(engine: AsyncEngine) -> str | None:
+    """返回 Alembic 当前版本；未使用迁移管理的开发库返回 None。"""
+    try:
+        async with engine.connect() as conn:
+            value = await conn.scalar(text("SELECT version_num FROM alembic_version LIMIT 1"))
+        return str(value) if value else None
+    except Exception:  # noqa: BLE001 表不存在或数据库尚未就绪
+        return None
 
 
 async def session_scope(

@@ -72,6 +72,27 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return (await resp.json()) as T;
 }
 
+async function download(path: string): Promise<{ blob: Blob; filename: string }> {
+  const resp = await fetch(path, { headers: authHeaders() });
+  if (resp.status === 401) {
+    setToken(null);
+    location.href = "/login";
+    throw new ApiError(401, "登录已过期");
+  }
+  if (!resp.ok) {
+    let detail = `HTTP ${resp.status}`;
+    try {
+      detail = normalizeDetail((await resp.json()).detail) ?? detail;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(resp.status, detail);
+  }
+  const disposition = resp.headers.get("content-disposition") ?? "";
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? "agentforge-export.md";
+  return { blob: await resp.blob(), filename };
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
@@ -80,4 +101,5 @@ export const api = {
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  download,
 };

@@ -11,7 +11,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
-    healthCheckPath: /api/health
+    healthCheckPath: /api/readyz
     envVars:
       - key: SECRET_KEY
         generateValue: true
@@ -27,6 +27,10 @@ services:
         value: mock
       - key: SEARCH_PROVIDER
         value: auto
+      - key: SANDBOX_ENABLED
+        value: "false"
+      - key: CUSTOM_HTTP_TOOLS_ENABLED
+        value: "false"
       # 由上面的托管 PostgreSQL 自动注入（连接串会被应用规范化为 asyncpg 驱动）
       - key: DATABASE_URL
         fromDatabase:
