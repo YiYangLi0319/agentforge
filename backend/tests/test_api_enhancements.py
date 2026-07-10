@@ -179,6 +179,25 @@ async def test_dashboard_evals_grouped_by_suite(app, client, auth_headers):
     assert suites["rag"][0]["passed"] is None
 
 
+async def test_traces_compare_two_runs(client, auth_headers):
+    session = (await client.post("/api/chat/sessions", json={}, headers=auth_headers)).json()
+    r1 = await post_and_drain(client, session["id"], "第一条问题：介绍你的能力", auth_headers)
+    r2 = await post_and_drain(client, session["id"], "第二条不同的问题：讲讲工具生态", auth_headers)
+
+    resp = await client.get(f"/api/traces/compare?a={r1['id']}&b={r2['id']}", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["runs"]) == 2
+    assert {run["id"] for run in data["runs"]} == {r1["id"], r2["id"]}
+    first = data["runs"][0]
+    assert "totals" in first and "by_kind" in first and "tools" in first
+    assert first["totals"]["total_tokens"] >= 0
+
+    # 同一条运行不允许对比
+    bad = await client.get(f"/api/traces/compare?a={r1['id']}&b={r1['id']}", headers=auth_headers)
+    assert bad.status_code == 400
+
+
 async def test_custom_tool_crud_and_ssrf(client, auth_headers):
     created = await client.post(
         "/api/tools/custom",

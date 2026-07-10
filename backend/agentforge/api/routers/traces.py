@@ -40,6 +40,71 @@ async def list_runs(
     ]
 
 
+def _input_preview(run: Run) -> str:
+    return str((run.input or {}).get("message") or (run.input or {}).get("query") or "")[:80]
+
+
+async def _run_aggregate(db: AsyncSession, user: User, run_id: str) -> dict:
+    run = (
+        await db.execute(select(Run).where(Run.id == run_id, Run.user_id == user.id))
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"运行 {run_id} 不存在")
+    spans = (
+        (await db.execute(select(Span).where(Span.run_id == run_id))).scalars().all()
+    )
+    by_kind: dict[str, dict] = {}
+    tools: dict[str, dict] = {}
+    for span in spans:
+        agg = by_kind.setdefault(span.kind, {"count": 0, "tokens": 0, "duration_ms": 0, "cost": 0.0})
+        agg["count"] += 1
+        agg["tokens"] += span.prompt_tokens + span.completion_tokens
+        if span.ended_at:
+            agg["duration_ms"] += int((span.ended_at - span.started_at).total_seconds() * 1000)
+        agg["cost"] = round(agg["cost"] + span.cost, 6)
+        if span.kind == "tool":
+            name = span.name.replace("tool:", "")
+            tool = tools.setdefault(name, {"count": 0, "errors": 0})
+            tool["count"] += 1
+            if span.status == "error":
+                tool["errors"] += 1
+    return {
+        "id": run.id,
+        "kind": run.kind,
+        "status": run.status,
+        "input_preview": _input_preview(run),
+        "created_at": run.created_at.isoformat(),
+        "totals": {
+            "prompt_tokens": run.prompt_tokens,
+            "completion_tokens": run.completion_tokens,
+            "total_tokens": run.prompt_tokens + run.completion_tokens,
+            "cost": run.cost,
+            "duration_ms": int((run.finished_at - run.created_at).total_seconds() * 1000)
+            if run.finished_at
+            else None,
+            "span_count": len(spans),
+            "llm_calls": by_kind.get("llm", {}).get("count", 0),
+            "tool_calls": by_kind.get("tool", {}).get("count", 0),
+            "retrievals": by_kind.get("retrieval", {}).get("count", 0),
+        },
+        "by_kind": by_kind,
+        "tools": [{"name": name, **stats} for name, stats in sorted(tools.items())],
+    }
+
+
+@router.get("/compare")
+async def compare_runs(
+    a: str = Query(..., description="运行 A 的 id"),
+    b: str = Query(..., description="运行 B 的 id"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """并排对比两次运行：整体用量/耗时/成本 + 按 Span 类型聚合 + 工具调用分布。"""
+    if a == b:
+        raise HTTPException(status_code=400, detail="请选择两条不同的运行进行对比")
+    return {"runs": [await _run_aggregate(db, user, a), await _run_aggregate(db, user, b)]}
+
+
 @router.get("/runs/{run_id}")
 async def run_trace(
     run_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)

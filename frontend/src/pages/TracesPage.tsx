@@ -4,6 +4,7 @@ import {
   Braces,
   ChevronRight,
   Database,
+  GitCompare,
   MessageSquare,
   RefreshCw,
   Telescope,
@@ -13,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge, Button, EmptyState, formatCost, formatTime, statusTone, STATUS_LABEL } from "../components/ui";
 import { api } from "../lib/api";
-import type { RunSummary, SpanInfo } from "../lib/types";
+import type { RunCompareItem, RunComparison, RunSummary, SpanInfo } from "../lib/types";
 
 const KIND_ICON: Record<string, typeof Bot> = {
   agent: Bot,
@@ -64,6 +65,9 @@ export default function TracesPage() {
   const [detail, setDetail] = useState<{ run: Record<string, unknown>; spans: SpanInfo[] } | null>(null);
   const [selectedSpan, setSelectedSpan] = useState<SpanInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [compareMode, setCompareMode] = useState(false);
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [comparison, setComparison] = useState<RunComparison | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -78,10 +82,37 @@ export default function TracesPage() {
     load();
   }, [load]);
 
+  useEffect(() => {
+    if (compareIds.length !== 2) {
+      setComparison(null);
+      return;
+    }
+    let active = true;
+    api
+      .get<RunComparison>(`/api/traces/compare?a=${compareIds[0]}&b=${compareIds[1]}`)
+      .then((c) => active && setComparison(c))
+      .catch(() => active && setComparison(null));
+    return () => {
+      active = false;
+    };
+  }, [compareIds]);
+
   const openRun = async (id: string) => {
     setSelectedRun(id);
     setSelectedSpan(null);
     setDetail(await api.get(`/api/traces/runs/${id}`));
+  };
+
+  const toggleCompare = (id: string) => {
+    setCompareIds((ids) =>
+      ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id].slice(-2),
+    );
+  };
+
+  const toggleCompareMode = () => {
+    setCompareMode((on) => !on);
+    setCompareIds([]);
+    setComparison(null);
   };
 
   const tree = useMemo(() => (detail ? buildSpanTree(detail.spans) : []), [detail]);
@@ -103,24 +134,50 @@ export default function TracesPage() {
             <option value="chat">对话</option>
             <option value="research">研究</option>
           </select>
+          <Button
+            size="sm"
+            variant={compareMode ? "primary" : "ghost"}
+            onClick={toggleCompareMode}
+            aria-label="对比模式：选择两条运行进行对比"
+          >
+            <GitCompare size={12} />
+          </Button>
           <Button size="sm" variant="ghost" onClick={load} loading={loading}>
             <RefreshCw size={12} />
           </Button>
         </div>
+        {compareMode && (
+          <div className="border-b border-zinc-800/80 bg-indigo-500/5 px-4 py-1.5 text-[11px] text-indigo-300">
+            对比模式：勾选两条运行（已选 {compareIds.length}/2）
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto">
           {runs.length === 0 && (
             <div className="px-4 py-10 text-center text-xs text-zinc-600">暂无运行记录</div>
           )}
-          {runs.map((r) => (
+          {runs.map((r) => {
+            const compareIdx = compareIds.indexOf(r.id);
+            const active = compareMode ? compareIdx >= 0 : selectedRun === r.id;
+            return (
             <button
               key={r.id}
-              onClick={() => openRun(r.id)}
+              onClick={() => (compareMode ? toggleCompare(r.id) : openRun(r.id))}
               className={
                 "block w-full border-b border-zinc-800/50 px-4 py-3 text-left hover:bg-zinc-900/60 " +
-                (selectedRun === r.id ? "bg-zinc-900" : "")
+                (active ? "bg-zinc-900" : "")
               }
             >
               <div className="mb-1 flex items-center gap-2">
+                {compareMode && (
+                  <span
+                    className={
+                      "flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold " +
+                      (compareIdx >= 0 ? "bg-indigo-500 text-white" : "border border-zinc-600 text-transparent")
+                    }
+                  >
+                    {compareIdx >= 0 ? "AB"[compareIdx] : ""}
+                  </span>
+                )}
                 {r.kind === "research" ? (
                   <Telescope size={13} className="text-violet-400" />
                 ) : (
@@ -138,13 +195,24 @@ export default function TracesPage() {
                 {r.duration_ms !== null && <span>{(r.duration_ms / 1000).toFixed(1)}s</span>}
               </div>
             </button>
-          ))}
+            );
+          })}
         </div>
       </div>
 
-      {/* Span 树 */}
+      {/* Span 树 / 运行对比 */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {detail ? (
+        {compareMode ? (
+          comparison ? (
+            <RunComparisonView comparison={comparison} />
+          ) : (
+            <EmptyState
+              icon={<GitCompare size={28} />}
+              title="选择两条运行进行对比"
+              desc="在左侧勾选 A、B 两条运行，查看用量 / 耗时 / 成本与工具调用的差异"
+            />
+          )
+        ) : detail ? (
           <>
             <div className="border-b border-zinc-800/80 px-5 py-3 text-xs text-zinc-400">
               调用链 · {detail.spans.length} 个 Span
@@ -235,6 +303,117 @@ export default function TracesPage() {
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function fmtDuration(ms: number | null): string {
+  if (ms == null) return "-";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
+
+/** 资源类指标：越高越"差"（红），越低越"好"（绿）；用于成本/耗时/token/调用数的差值着色。 */
+function DeltaCell({ a, b, format }: { a: number | null; b: number | null; format: (v: number | null) => string }) {
+  if (a == null || b == null) return <span className="text-zinc-600">-</span>;
+  const delta = b - a;
+  if (delta === 0) return <span className="text-zinc-500">0</span>;
+  const worse = delta > 0;
+  const pct = a !== 0 ? ` (${delta > 0 ? "+" : ""}${Math.round((delta / a) * 100)}%)` : "";
+  return (
+    <span className={worse ? "text-rose-400" : "text-emerald-400"}>
+      {delta > 0 ? "▲" : "▼"} {format(Math.abs(delta))}
+      <span className="text-zinc-600">{pct}</span>
+    </span>
+  );
+}
+
+function RunComparisonView({ comparison }: { comparison: RunComparison }) {
+  const [a, b] = comparison.runs;
+  const num = (v: number | null) => (v == null ? "-" : v.toLocaleString());
+  const rows: { label: string; a: number | null; b: number | null; fmt: (v: number | null) => string }[] = [
+    { label: "总 tokens", a: a.totals.total_tokens, b: b.totals.total_tokens, fmt: num },
+    { label: "输入 tokens", a: a.totals.prompt_tokens, b: b.totals.prompt_tokens, fmt: num },
+    { label: "输出 tokens", a: a.totals.completion_tokens, b: b.totals.completion_tokens, fmt: num },
+    { label: "成本", a: a.totals.cost, b: b.totals.cost, fmt: (v) => formatCost(v ?? 0) },
+    { label: "耗时", a: a.totals.duration_ms, b: b.totals.duration_ms, fmt: fmtDuration },
+    { label: "Span 数", a: a.totals.span_count, b: b.totals.span_count, fmt: num },
+    { label: "LLM 调用", a: a.totals.llm_calls, b: b.totals.llm_calls, fmt: num },
+    { label: "工具调用", a: a.totals.tool_calls, b: b.totals.tool_calls, fmt: num },
+    { label: "检索次数", a: a.totals.retrievals, b: b.totals.retrievals, fmt: num },
+  ];
+  const toolNames = Array.from(new Set([...a.tools, ...b.tools].map((t) => t.name))).sort();
+  const toolCount = (item: RunCompareItem, name: string) => item.tools.find((t) => t.name === name)?.count ?? 0;
+
+  return (
+    <div className="flex-1 overflow-y-auto p-5">
+      <div className="mb-4 grid grid-cols-2 gap-3">
+        {[a, b].map((r, i) => (
+          <div key={r.id} className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+            <div className="mb-1 flex items-center gap-1.5">
+              <span className="flex h-4 w-4 items-center justify-center rounded bg-indigo-500 text-[9px] font-bold text-white">
+                {"AB"[i]}
+              </span>
+              <Badge tone={statusTone(r.status)}>{STATUS_LABEL[r.status] ?? r.status}</Badge>
+              <span className="text-[10px] text-zinc-500">{r.kind}</span>
+            </div>
+            <div className="truncate text-[12px] text-zinc-300" title={r.input_preview}>
+              {r.input_preview || "（无输入预览）"}
+            </div>
+            <div className="mt-0.5 font-mono text-[10px] text-zinc-600">{formatTime(r.created_at)}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-zinc-800">
+        <table className="w-full text-[12px]">
+          <thead>
+            <tr className="bg-zinc-900/80 text-zinc-500">
+              <th className="px-3 py-2 text-left font-medium">指标</th>
+              <th className="px-3 py-2 text-right font-medium">A</th>
+              <th className="px-3 py-2 text-right font-medium">B</th>
+              <th className="px-3 py-2 text-right font-medium">Δ (B−A)</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800/70">
+            {rows.map((row) => (
+              <tr key={row.label} className="text-zinc-300">
+                <td className="px-3 py-1.5 text-zinc-400">{row.label}</td>
+                <td className="px-3 py-1.5 text-right font-mono">{row.fmt(row.a)}</td>
+                <td className="px-3 py-1.5 text-right font-mono">{row.fmt(row.b)}</td>
+                <td className="px-3 py-1.5 text-right font-mono">
+                  <DeltaCell a={row.a} b={row.b} format={row.fmt} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {toolNames.length > 0 && (
+        <div className="mt-4">
+          <div className="mb-2 text-xs font-medium text-zinc-300">工具调用分布</div>
+          <div className="overflow-hidden rounded-xl border border-zinc-800">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="bg-zinc-900/80 text-zinc-500">
+                  <th className="px-3 py-2 text-left font-medium">工具</th>
+                  <th className="px-3 py-2 text-right font-medium">A</th>
+                  <th className="px-3 py-2 text-right font-medium">B</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/70">
+                {toolNames.map((name) => (
+                  <tr key={name} className="text-zinc-300">
+                    <td className="px-3 py-1.5 font-mono text-zinc-400">{name}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">{toolCount(a, name)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">{toolCount(b, name)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

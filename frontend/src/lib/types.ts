@@ -307,6 +307,31 @@ export interface RunSummary {
   duration_ms: number | null;
 }
 
+export interface RunCompareItem {
+  id: string;
+  kind: string;
+  status: string;
+  input_preview: string;
+  created_at: string;
+  totals: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cost: number;
+    duration_ms: number | null;
+    span_count: number;
+    llm_calls: number;
+    tool_calls: number;
+    retrievals: number;
+  };
+  by_kind: Record<string, { count: number; tokens: number; duration_ms: number; cost: number }>;
+  tools: { name: string; count: number; errors: number }[];
+}
+
+export interface RunComparison {
+  runs: RunCompareItem[];
+}
+
 export interface SpanInfo {
   id: string;
   parent_id: string | null;
