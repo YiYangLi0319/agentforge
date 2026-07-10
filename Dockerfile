@@ -34,5 +34,5 @@ USER agentforge
 
 EXPOSE 8000
 
-# 单实例启动：先执行版本化迁移，再启动 API。当前事件总线/审批所有权为进程内实现，不支持多 worker。
-CMD ["sh", "-c", "alembic upgrade head && uvicorn agentforge.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
+# 单实例启动：先兼容遗留库并迁移，再启动 API。当前事件总线/审批所有权为进程内实现，不支持多 worker。
+CMD ["sh", "-c", "python -m agentforge.db.bootstrap && uvicorn agentforge.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

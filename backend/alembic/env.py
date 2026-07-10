@@ -16,7 +16,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", normalize_db_url(get_settings().database_url))
+# 允许启动脚本先写入 sqlalchemy.url；仅在未设置时回退到应用配置。
+_existing_url = (config.get_main_option("sqlalchemy.url") or "").strip()
+if not _existing_url:
+    config.set_main_option("sqlalchemy.url", normalize_db_url(get_settings().database_url))
+else:
+    config.set_main_option("sqlalchemy.url", normalize_db_url(_existing_url))
 
 target_metadata = Base.metadata
 

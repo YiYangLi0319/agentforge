@@ -28,11 +28,26 @@ def normalize_db_url(url: str) -> str:
 
     Render/Heroku 等给出的 DATABASE_URL 形如 postgres://user:pass@host/db，
     而本项目用 asyncpg 异步驱动，需要 postgresql+asyncpg://。
+    同时把 libpq 风格的 sslmode 转成 asyncpg 可识别的 ssl 查询参数。
     """
     if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url[len("postgres://") :]
-    if url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url[len("postgresql://") :]
+        url = "postgresql+asyncpg://" + url[len("postgres://") :]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+
+    if "+asyncpg://" in url and "sslmode=" in url:
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+        parsed = urlparse(url)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        sslmode = params.pop("sslmode", None)
+        if sslmode and "ssl" not in params:
+            if sslmode in {"disable", "allow"}:
+                params["ssl"] = "false"
+            else:
+                # require / prefer / verify-ca / verify-full
+                params["ssl"] = "true"
+        url = urlunparse(parsed._replace(query=urlencode(params)))
     return url
 
 

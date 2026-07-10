@@ -78,7 +78,7 @@ git push -u origin main
 
 `render.yaml` 蓝图**已自动创建一个免费 Render PostgreSQL** 并注入 `DATABASE_URL`，数据持久化、重新部署不丢失（账号、知识库、历史都保留）。
 
-- 镜像启动时先执行 `alembic upgrade head`，再启动单 worker API；应用不会在生产进程里用 `create_all` 偷改 schema。
+- 镜像启动时先执行 `python -m agentforge.db.bootstrap`（兼容早期 create_all 遗留库：无 `alembic_version` 时先 stamp 再 upgrade），再启动单 worker API；应用不会在生产进程里用 `create_all` 偷改 schema。
 - 应用会把 `postgres://...` 规范化为 asyncpg 驱动；能启用 pgvector 时使用原生向量列，否则在建库时固定为 JSON 降级模式，后续启动不会自动翻转物理列类型。
 - 若用 Railway/Zeabur：在平台加一个 PostgreSQL 服务，把它的连接串填到 `DATABASE_URL` 即可（`postgres://` 或 `postgresql://` 都会被自动识别）。
 - 不想用 Postgres 也可改回 `DATABASE_URL=sqlite+aiosqlite:///./agentforge.db`（但免费档文件系统临时，会随重部署清空）。
