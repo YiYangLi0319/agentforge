@@ -48,7 +48,8 @@ async def register(
     ).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=409, detail="用户名已被占用")
-    user = User(username=body.username, password_hash=hash_password(body.password))
+    is_admin = bool(container.settings.admin_username) and body.username == container.settings.admin_username
+    user = User(username=body.username, password_hash=hash_password(body.password), is_admin=is_admin)
     db.add(user)
     await db.commit()
     token = create_access_token(user.id, container.settings.secret_key, container.settings.jwt_expire_hours)
@@ -71,8 +72,24 @@ async def login(
 
 
 @router.get("/me")
-async def me(user: User = Depends(get_current_user)) -> dict:
-    return {"user_id": user.id, "username": user.username, "created_at": user.created_at.isoformat()}
+async def me(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    container: Container = Depends(get_container),
+) -> dict:
+    from agentforge.services.quota import quota_status
+
+    # 管理员用户名在登录后可自动提权（兼容注册早于配置的情况）
+    if container.settings.admin_username and user.username == container.settings.admin_username and not user.is_admin:
+        user.is_admin = True
+        await db.commit()
+    return {
+        "user_id": user.id,
+        "username": user.username,
+        "is_admin": user.is_admin,
+        "created_at": user.created_at.isoformat(),
+        "quota": await quota_status(db, user, container.settings),
+    }
 
 
 class ApiKeyCreate(BaseModel):

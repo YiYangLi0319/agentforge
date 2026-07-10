@@ -36,6 +36,8 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    daily_token_quota: Mapped[int] = mapped_column(Integer, default=0)  # 0=用全局默认额度
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -57,7 +59,8 @@ class ChatSession(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(256), default="新对话")
-    agent_type: Mapped[str] = mapped_column(String(32), default="assistant")  # assistant | team
+    agent_type: Mapped[str] = mapped_column(String(32), default="assistant")  # assistant | team | custom
+    custom_agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     kb_ids: Mapped[list] = mapped_column(JSON, default=list)
     summary: Mapped[str] = mapped_column(Text, default="")  # 滚动压缩摘要（短期记忆）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -253,6 +256,59 @@ class CustomTool(Base):
     body_template: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     timeout: Mapped[int] = mapped_column(Integer, default=15)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CustomAgent(Base):
+    """用户自定义 Agent：名称 + 人设 + 工具选择 + 绑定知识库，运行时动态构建。"""
+
+    __tablename__ = "custom_agents"
+    __table_args__ = (Index("ix_custom_agents_user", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str] = mapped_column(Text, default="")
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    tools: Mapped[list] = mapped_column(JSON, default=list)  # 内置工具名列表
+    kb_ids: Mapped[list] = mapped_column(JSON, default=list)
+    max_steps: Mapped[int] = mapped_column(Integer, default=8)
+    temperature: Mapped[float] = mapped_column(Float, default=0.3)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Feedback(Base):
+    """回答反馈：赞/踩 + 评论，可导出为评估数据集（生产->评估闭环）。"""
+
+    __tablename__ = "feedback"
+    __table_args__ = (Index("ix_feedback_user", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    run_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    session_id: Mapped[str] = mapped_column(String(32), default="")
+    rating: Mapped[str] = mapped_column(String(8))  # up | down
+    question: Mapped[str] = mapped_column(Text, default="")
+    answer: Mapped[str] = mapped_column(Text, default="")
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Dataset(Base):
+    """上传的数据表（CSV），供数据分析 Agent 用 Text2SQL 查询。"""
+
+    __tablename__ = "datasets"
+    __table_args__ = (Index("ix_datasets_user", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(128))
+    filename: Mapped[str] = mapped_column(String(256))
+    table_name: Mapped[str] = mapped_column(String(64))
+    columns: Mapped[list] = mapped_column(JSON, default=list)  # [{name, type}]
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    rows: Mapped[list] = mapped_column(JSON, default=list)  # 全量行（演示级；生产应落列存）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

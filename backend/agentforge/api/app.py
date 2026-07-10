@@ -142,9 +142,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(status_code=500, content={"detail": f"服务器内部错误: {type(exc).__name__}"})
 
     from agentforge.api.routers import (
+        admin,
+        agents,
         auth,
         chat,
         dashboard,
+        datasets,
+        feedback,
         knowledge,
         meta,
         research,
@@ -162,6 +166,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(traces.router, prefix="/api/traces", tags=["traces"])
     app.include_router(tools.router, prefix="/api/tools", tags=["tools"])
     app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
+    app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
+    app.include_router(feedback.router, prefix="/api/feedback", tags=["feedback"])
+    app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+    app.include_router(datasets.router, prefix="/api/datasets", tags=["datasets"])
 
     _mount_frontend(app, settings)
     return app

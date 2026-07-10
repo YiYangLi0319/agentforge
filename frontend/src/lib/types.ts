@@ -131,6 +131,66 @@ export interface CustomToolInfo {
   created_at: string;
 }
 
+export interface QuotaInfo {
+  used: number;
+  limit: number;
+  remaining: number | null;
+  unlimited: boolean;
+  is_admin: boolean;
+}
+
+export interface MeInfo {
+  user_id: string;
+  username: string;
+  is_admin: boolean;
+  created_at: string;
+  quota: QuotaInfo;
+}
+
+export interface CustomAgentInfo {
+  id: string;
+  name: string;
+  description: string;
+  system_prompt: string;
+  tools: string[];
+  kb_ids: string[];
+  max_steps: number;
+  temperature: number;
+  created_at: string;
+}
+
+export interface DatasetInfo {
+  id: string;
+  name: string;
+  filename: string;
+  columns: { name: string; type: string }[];
+  row_count: number;
+  created_at: string;
+  preview?: Record<string, unknown>[];
+}
+
+export interface AnalyzeResult {
+  question: string;
+  sql: string;
+  summary: string;
+  result: { columns: string[]; rows: unknown[][] };
+  chart: { type: string; x: string; y: string };
+  latency_ms: number;
+  error?: string;
+}
+
+export interface AdminUser {
+  id: string;
+  username: string;
+  is_admin: boolean;
+  quota: number;
+  used_today: number;
+  total_tokens: number;
+  total_cost: number;
+  run_count: number;
+  created_at: string;
+}
+
 export interface ResearchPlan {
   topic: string;
   sub_questions: { id: string; question: string; queries: string[] }[];

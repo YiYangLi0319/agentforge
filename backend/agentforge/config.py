@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     # MCP：JSON 配置文件路径（描述要接入的 MCP 服务器），为空则不启用
     mcp_config_path: str = ""
 
+    # 多用户运营
+    admin_username: str = ""  # 该用户名注册/登录后自动成为管理员
+    daily_token_quota: int = 200000  # 每用户每日 token 额度（0=不限）；管理员不受限
+    max_dataset_rows: int = 5000  # 单个上传数据集最大行数
+
     # CORS
     cors_origins: list[str] = [
         "http://localhost:5173",

@@ -13,6 +13,7 @@ from agentforge.api.deps import get_container, get_current_user, get_db, rate_li
 from agentforge.core.events import AgentEvent, RunFailed, RunFinished
 from agentforge.core.runtime import RunContext
 from agentforge.db.models import ResearchReport, User
+from agentforge.services.quota import assert_within_quota
 
 router = APIRouter()
 
@@ -66,6 +67,7 @@ async def create_research(
     db: AsyncSession = Depends(get_db),
     container: Container = Depends(get_container),
 ) -> dict:
+    await assert_within_quota(db, user, container.settings)
     report = ResearchReport(run_id="", user_id=user.id, query=body.query, status="running")
     db.add(report)
     await db.commit()

@@ -5,6 +5,9 @@ import {
   MessagesSquare,
   SendHorizonal,
   ShieldQuestion,
+  Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Users,
 } from "lucide-react";
@@ -19,6 +22,7 @@ import type {
   AgentEvent,
   ChatMessageInfo,
   ChatSessionInfo,
+  CustomAgentInfo,
   KnowledgeBaseInfo,
   Source,
 } from "../lib/types";
@@ -44,10 +48,13 @@ export default function ChatPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [kbs, setKbs] = useState<KnowledgeBaseInfo[]>([]);
   const [newKbIds, setNewKbIds] = useState<string[]>([]);
-  const [newAgentType, setNewAgentType] = useState<"assistant" | "team">("assistant");
+  const [newAgentType, setNewAgentType] = useState<"assistant" | "team" | "custom">("assistant");
+  const [customAgents, setCustomAgents] = useState<CustomAgentInfo[]>([]);
+  const [newCustomAgentId, setNewCustomAgentId] = useState<string>("");
 
   const abortRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const runIdRef = useRef<string | null>(null);
   const activeSession = sessions.find((s) => s.id === activeId);
 
   const loadSessions = useCallback(async () => {
@@ -61,6 +68,7 @@ export default function ChatPage() {
       if (list.length > 0) setActiveId((prev) => prev ?? list[0].id);
     });
     api.get<KnowledgeBaseInfo[]>("/api/kb").then(setKbs).catch(() => undefined);
+    api.get<CustomAgentInfo[]>("/api/agents").then(setCustomAgents).catch(() => undefined);
     return () => abortRef.current?.();
   }, [loadSessions]);
 
@@ -112,6 +120,7 @@ export default function ChatPage() {
             role: "assistant",
             content: String(text),
             sources,
+            run_id: runIdRef.current ?? undefined,
             created_at: new Date().toISOString(),
           },
         ]);
@@ -170,6 +179,7 @@ export default function ChatPage() {
         content,
       });
       setRunId(resp.run_id);
+      runIdRef.current = resp.run_id;
       abortRef.current = streamRunEvents(resp.run_id, {
         onEvent: handleEvent,
         onError: () => setRunning(false),
@@ -200,8 +210,10 @@ export default function ChatPage() {
   };
 
   const createSession = async () => {
+    if (newAgentType === "custom" && !newCustomAgentId) return;
     const s = await api.post<ChatSessionInfo>("/api/chat/sessions", {
       agent_type: newAgentType,
+      custom_agent_id: newAgentType === "custom" ? newCustomAgentId : undefined,
       kb_ids: newKbIds,
     });
     setShowCreate(false);
@@ -365,11 +377,12 @@ export default function ChatPage() {
             <h3 className="mb-4 text-sm font-semibold text-zinc-100">新建对话</h3>
             <div className="mb-3">
               <div className="mb-1.5 text-xs text-zinc-500">Agent 模式</div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 {(
                   [
-                    ["assistant", "智能助手", "单 Agent · ReAct 循环", Bot],
-                    ["team", "专家团队", "Supervisor 多 Agent 协作", Users],
+                    ["assistant", "智能助手", "单 Agent · ReAct", Bot],
+                    ["team", "专家团队", "多 Agent 协作", Users],
+                    ["custom", "专属 Agent", "你自建的 Agent", Sparkles],
                   ] as const
                 ).map(([value, label, desc, Icon]) => (
                   <button
@@ -383,11 +396,33 @@ export default function ChatPage() {
                     }
                   >
                     <Icon size={15} className={newAgentType === value ? "text-indigo-400" : "text-zinc-500"} />
-                    <div className="mt-1 text-[13px] font-medium text-zinc-200">{label}</div>
+                    <div className="mt-1 text-[12px] font-medium text-zinc-200">{label}</div>
                     <div className="text-[10px] text-zinc-500">{desc}</div>
                   </button>
                 ))}
               </div>
+              {newAgentType === "custom" && (
+                <div className="mt-2">
+                  {customAgents.length === 0 ? (
+                    <div className="rounded-lg bg-zinc-800/60 px-3 py-2 text-xs text-zinc-500">
+                      还没有自定义 Agent，先到「自定义 Agent」页面创建
+                    </div>
+                  ) : (
+                    <select
+                      value={newCustomAgentId}
+                      onChange={(e) => setNewCustomAgentId(e.target.value)}
+                      className="w-full rounded-lg border border-zinc-700/80 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:outline-none"
+                    >
+                      <option value="">选择一个自定义 Agent…</option>
+                      {customAgents.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
             </div>
             <div className="mb-4">
               <div className="mb-1.5 text-xs text-zinc-500">绑定知识库（可多选，绑定后回答带引用溯源）</div>
@@ -462,6 +497,38 @@ function MessageBubble({ msg }: { msg: ChatMessageInfo }) {
           </div>
         </div>
       )}
+      {msg.run_id && <FeedbackButtons runId={msg.run_id} />}
+    </div>
+  );
+}
+
+function FeedbackButtons({ runId }: { runId: string }) {
+  const [rating, setRating] = useState<"up" | "down" | null>(null);
+  const submit = async (r: "up" | "down") => {
+    setRating(r);
+    try {
+      await api.post("/api/feedback", { run_id: runId, rating: r });
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <div className="mt-2 flex items-center gap-1.5">
+      <button
+        onClick={() => submit("up")}
+        className={"rounded p-1 " + (rating === "up" ? "text-emerald-400" : "text-zinc-600 hover:text-zinc-400")}
+        title="有帮助"
+      >
+        <ThumbsUp size={13} />
+      </button>
+      <button
+        onClick={() => submit("down")}
+        className={"rounded p-1 " + (rating === "down" ? "text-rose-400" : "text-zinc-600 hover:text-zinc-400")}
+        title="没帮助"
+      >
+        <ThumbsDown size={13} />
+      </button>
+      {rating && <span className="text-[10px] text-zinc-600">感谢反馈</span>}
     </div>
   );
 }

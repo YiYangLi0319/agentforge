@@ -80,6 +80,56 @@ def _build_assistant(
     )
 
 
+_TOOL_MAP: dict[str, Tool] = {
+    "web_search": web_search,
+    "web_fetch": web_fetch,
+    "calculator": calculator,
+    "current_time": current_time,
+    "search_knowledge_base": search_knowledge_base,
+}
+
+
+async def _build_custom(
+    container: Container, custom_agent_id: str, memories_note: str, extra_tools: list[Tool] | None = None
+) -> Agent | None:
+    """按用户自定义 Agent 配置构建；配置不存在则返回 None（回退到默认助手）。"""
+    from sqlalchemy import select as _select
+
+    from agentforge.db.models import CustomAgent
+
+    async with container.sessions() as db:
+        cfg = (
+            await db.execute(_select(CustomAgent).where(CustomAgent.id == custom_agent_id))
+        ).scalar_one_or_none()
+    if cfg is None:
+        return None
+
+    tools: list[Tool] = []
+    for name in cfg.tools or []:
+        if name == "python_execute":
+            tools.append(_sandbox_tool(container))
+        elif name in _TOOL_MAP:
+            tools.append(_TOOL_MAP[name])
+    tools.extend(extra_tools or [])
+
+    prompt = cfg.system_prompt or "你是一个乐于助人的 AI 助手。"
+    if cfg.kb_ids and search_knowledge_base not in tools:
+        tools.insert(0, search_knowledge_base)
+        prompt += "\n涉及知识库内容必须先调用 search_knowledge_base 检索，并在引用处标注来源编号 [n]。"
+    if memories_note:
+        prompt += "\n\n" + memories_note
+
+    return Agent(
+        name=cfg.name or "custom",
+        llm=container.llm,
+        tools=ToolRegistry(tools),
+        system_prompt=prompt,
+        max_steps=cfg.max_steps,
+        token_budget=container.settings.agent_token_budget,
+        temperature=cfg.temperature,
+    )
+
+
 def _build_team(
     container: Container, kb_ids: list[str], memories_note: str, extra_tools: list[Tool] | None = None
 ) -> Agent:
@@ -195,6 +245,23 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             }
         )
 
+        # 自定义 Agent：加载配置，用其绑定的知识库；缓存作用域也据此隔离
+        custom_cfg = None
+        if chat_session.custom_agent_id:
+            from sqlalchemy import select as _select
+
+            from agentforge.db.models import CustomAgent
+
+            async with container.sessions() as db:
+                custom_cfg = (
+                    await db.execute(
+                        _select(CustomAgent).where(CustomAgent.id == chat_session.custom_agent_id)
+                    )
+                ).scalar_one_or_none()
+            if custom_cfg is not None:
+                ctx.kb_ids = list(custom_cfg.kb_ids or [])
+        cache_scope = chat_session.custom_agent_id or chat_session.agent_type
+
         # 0) 输入护栏：注入检测 + 内容审核，命中即拒绝，不进入 Agent
         guard_in = container.guardrails.check_input(user_message)
         if guard_in.blocked:
@@ -209,9 +276,7 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             return
 
         # 1) 语义缓存：相似问题直接复用历史答案
-        cached = await container.semantic_cache.lookup(
-            chat_session.agent_type, ctx.kb_ids, user_message
-        )
+        cached = await container.semantic_cache.lookup(cache_scope, ctx.kb_ids, user_message)
         if cached is not None:
             yield CacheHit(similarity=cached.similarity)
             answer = cached.answer
@@ -247,8 +312,15 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
         except Exception as e:  # noqa: BLE001
             logger.warning("加载自定义工具失败: %s", e)
 
-        builder = _build_team if chat_session.agent_type == "team" else _build_assistant
-        agent = builder(container, ctx.kb_ids, render_memories(memories), extra_tools)
+        memories_note = render_memories(memories)
+        agent: Agent | None = None
+        if custom_cfg is not None:
+            agent = await _build_custom(
+                container, chat_session.custom_agent_id or "", memories_note, extra_tools
+            )
+        if agent is None:
+            builder = _build_team if chat_session.agent_type == "team" else _build_assistant
+            agent = builder(container, ctx.kb_ids, memories_note, extra_tools)
 
         final_text = ""
         async for ev in agent.run(prepared, ctx):
@@ -274,7 +346,7 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
         if final_text.strip():
             try:
                 await container.semantic_cache.store(
-                    chat_session.agent_type,
+                    cache_scope,
                     ctx.kb_ids,
                     user_message,
                     final_text,

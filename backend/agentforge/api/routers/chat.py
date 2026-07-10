@@ -8,21 +8,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agentforge.api.app import Container
 from agentforge.api.deps import get_container, get_current_user, get_db, rate_limited
 from agentforge.core.runtime import RunContext
-from agentforge.db.models import ChatMessage, ChatSession, KnowledgeBase, User
+from agentforge.db.models import ChatMessage, ChatSession, CustomAgent, KnowledgeBase, User
 from agentforge.services.chat import make_chat_factory
+from agentforge.services.quota import assert_within_quota
 
 router = APIRouter()
 
 
 class SessionCreate(BaseModel):
     title: str = Field(default="新对话", max_length=256)
-    agent_type: str = Field(default="assistant", pattern="^(assistant|team)$")
+    agent_type: str = Field(default="assistant", pattern="^(assistant|team|custom)$")
+    custom_agent_id: str | None = None
     kb_ids: list[str] = Field(default_factory=list)
 
 
 class SessionPatch(BaseModel):
     title: str | None = Field(default=None, max_length=256)
-    agent_type: str | None = Field(default=None, pattern="^(assistant|team)$")
+    agent_type: str | None = Field(default=None, pattern="^(assistant|team|custom)$")
     kb_ids: list[str] | None = None
 
 
@@ -42,6 +44,7 @@ def _session_dict(s: ChatSession) -> dict:
         "id": s.id,
         "title": s.title,
         "agent_type": s.agent_type,
+        "custom_agent_id": s.custom_agent_id,
         "kb_ids": s.kb_ids or [],
         "created_at": s.created_at.isoformat(),
         "updated_at": s.updated_at.isoformat(),
@@ -68,8 +71,26 @@ async def create_session(
         )
         if set(owned) != set(body.kb_ids):
             raise HTTPException(status_code=400, detail="包含不存在或无权访问的知识库")
+    custom_agent_id = None
+    if body.agent_type == "custom":
+        if not body.custom_agent_id:
+            raise HTTPException(status_code=400, detail="custom 模式需指定 custom_agent_id")
+        cfg = (
+            await db.execute(
+                select(CustomAgent).where(
+                    CustomAgent.id == body.custom_agent_id, CustomAgent.user_id == user.id
+                )
+            )
+        ).scalar_one_or_none()
+        if cfg is None:
+            raise HTTPException(status_code=404, detail="自定义 Agent 不存在")
+        custom_agent_id = cfg.id
     session = ChatSession(
-        user_id=user.id, title=body.title, agent_type=body.agent_type, kb_ids=body.kb_ids
+        user_id=user.id,
+        title=body.title,
+        agent_type=body.agent_type,
+        custom_agent_id=custom_agent_id,
+        kb_ids=body.kb_ids,
     )
     db.add(session)
     await db.commit()
@@ -172,6 +193,7 @@ async def post_message(
     container: Container = Depends(get_container),
 ) -> dict:
     s = await _own_session(db, user, session_id)
+    await assert_within_quota(db, user, container.settings)
 
     user_msg = ChatMessage(session_id=session_id, role="user", content=body.content)
     db.add(user_msg)

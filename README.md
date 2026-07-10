@@ -30,7 +30,8 @@ AgentForge 是一个**不依赖 LangChain / LangGraph、从协议层开始自研
 - **企业级基建**：JWT/API Key 双通道认证、Redis 限流（自动降级）、SSE 流式推送（断线续传）、human-in-the-loop 审批、事件溯源 + Checkpoint 断点恢复、全链路 Tracing（tokens/成本/耗时）；
 - **评估体系**：检索指标（Recall@K/MRR/nDCG）+ LLM-as-judge（忠实度/相关性/引用规范）+ Agent 任务完成率，一键出报告；
 - **可观测看板**：用量/成本/延迟趋势、工具使用 Top、缓存命中率、系统能力总览 + Prometheus `/metrics` 导出；
-- **完整前端**：流式聊天、Agent 执行时间线（含护栏/缓存事件）、审批卡片、知识库管理与检索 Playground、Trace 树、工具管理、可观测看板。
+- **平台化/多用户**：自定义 Agent 构建器（人设+工具+知识库）、每用户每日 token 配额、回答赞踩反馈（可导出为评估数据集）、管理后台（用户/用量/成本总览+配额调整）、数据分析 Agent（CSV → Text2SQL → 图表）；
+- **完整前端**：流式聊天（含赞踩反馈）、Agent 执行时间线（含护栏/缓存事件）、审批卡片、知识库管理与检索 Playground、Trace 树、工具管理、可观测看板、自定义 Agent、数据分析、管理后台。
 
 **零依赖可跑**：内置确定性 Mock Provider，不配任何 API Key、不装 Docker 也能完整体验全部功能（含测试与 CI）。
 
