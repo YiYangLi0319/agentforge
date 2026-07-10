@@ -3,16 +3,20 @@
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentforge.api.app import Container
 from agentforge.api.deps import get_container, get_current_user, get_db
 from agentforge.db.models import Run, Span, User
-from agentforge.observability.metrics import render_metrics
+from agentforge.observability.live import LIVE
+from agentforge.observability.metrics import record_client_event, render_metrics
 
 router = APIRouter()
+
+_CLIENT_EVENT_TYPES = {"sse_reconnect"}
 
 
 @router.get("/stats")
@@ -102,6 +106,34 @@ async def dashboard_stats(
             },
         },
     }
+
+
+@router.get("/live")
+async def dashboard_live(
+    minutes: int = Query(default=30, ge=1, le=180),
+    buckets: int = Query(default=30, ge=1, le=120),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """最近 N 分钟的实时曲线（分桶）：运行数、tokens、成本、缓存命中率、SSE 重连。
+
+    数据源为进程内实时缓冲，单副本可用；多副本请以 Prometheus 为准。
+    """
+    return LIVE.series(minutes=minutes, buckets=buckets)
+
+
+class ClientMetric(BaseModel):
+    type: str
+
+
+@router.post("/client-metric", status_code=204)
+async def client_metric(
+    body: ClientMetric, user: User = Depends(get_current_user)
+) -> Response:
+    """接收前端上报的观测事件（目前仅 SSE 重连），汇入实时缓冲与 Prometheus。"""
+    if body.type in _CLIENT_EVENT_TYPES:
+        LIVE.record_client_event(body.type)
+        record_client_event(body.type)
+    return Response(status_code=204)
 
 
 @router.post("/cache/clear")

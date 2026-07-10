@@ -1,4 +1,4 @@
-import { authHeaders } from "./api";
+import { authHeaders, reportClientMetric } from "./api";
 import type { AgentEvent } from "./types";
 
 class SSEHttpError extends Error {
@@ -85,6 +85,7 @@ export function streamRunEvents(
           return;
         }
         handlers.onReconnect?.(attempt + 1);
+        reportClientMetric("sse_reconnect"); // 供看板实时观测 SSE 断连恢复
         await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
       }
     }

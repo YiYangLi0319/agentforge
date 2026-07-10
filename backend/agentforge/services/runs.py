@@ -255,6 +255,7 @@ class RunManager:
 
     def _record_metrics(self, ctx, status, ptok, ctok, cost, usage_total, traced_cost) -> None:
         from agentforge.observability import metrics
+        from agentforge.observability.live import LIVE
 
         run_kind = ctx.state.get("kind", "chat")
         duration = 0.0
@@ -262,14 +263,11 @@ class RunManager:
         for s in ctx.tracer.spans:
             if s.kind == "agent" and s.ended_at:
                 duration = max(duration, s.duration_ms / 1000)
-        metrics.record_run(
-            run_kind,
-            status,
-            ptok or usage_total.prompt_tokens,
-            ctok or usage_total.completion_tokens,
-            cost or traced_cost,
-            duration,
-        )
+        final_prompt = ptok or usage_total.prompt_tokens
+        final_completion = ctok or usage_total.completion_tokens
+        final_cost = cost or traced_cost
+        metrics.record_run(run_kind, status, final_prompt, final_completion, final_cost, duration)
+        LIVE.record_run(run_kind, status, final_prompt + final_completion, final_cost, duration)
         for s in ctx.tracer.spans:
             if s.kind == "tool":
                 metrics.record_tool(s.name.replace("tool:", ""), s.status == "ok")

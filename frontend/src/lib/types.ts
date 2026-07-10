@@ -106,6 +106,33 @@ export interface DashboardStats {
   };
 }
 
+export interface LiveSeriesPoint {
+  t: string;
+  runs: number;
+  tokens: number;
+  cost: number;
+  cache_hits: number;
+  cache_misses: number;
+  hit_rate: number | null;
+  sse_reconnects: number;
+  avg_latency_s: number;
+}
+
+export interface LiveSeries {
+  minutes: number;
+  buckets: number;
+  points: LiveSeriesPoint[];
+  summary: {
+    runs: number;
+    tokens: number;
+    cost: number;
+    cache_hits: number;
+    cache_misses: number;
+    hit_rate: number | null;
+    sse_reconnects: number;
+  };
+}
+
 export interface BuiltinTool {
   name: string;
   description: string;

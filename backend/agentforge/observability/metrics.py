@@ -30,6 +30,9 @@ CACHE_EVENTS = Counter(
 GUARDRAIL_BLOCKS = Counter(
     "agentforge_guardrail_blocks_total", "护栏拦截次数", ["category"], registry=REGISTRY
 )
+CLIENT_EVENTS = Counter(
+    "agentforge_client_events_total", "前端上报事件（如 SSE 重连）", ["type"], registry=REGISTRY
+)
 
 
 def record_run(
@@ -59,6 +62,10 @@ def record_cache(hit: bool) -> None:
 
 def record_guardrail_block(category: str) -> None:
     GUARDRAIL_BLOCKS.labels(category=category).inc()
+
+
+def record_client_event(event_type: str) -> None:
+    CLIENT_EVENTS.labels(type=event_type).inc()
 
 
 def render_metrics() -> bytes:

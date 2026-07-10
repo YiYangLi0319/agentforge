@@ -119,6 +119,30 @@ async def test_dashboard_stats_and_metrics(client, auth_headers):
     assert "agentforge_runs_total" in resp.text
 
 
+async def test_dashboard_live_and_client_metric(client, auth_headers):
+    from agentforge.observability.live import LIVE
+
+    LIVE.reset()
+    session = (await client.post("/api/chat/sessions", json={}, headers=auth_headers)).json()
+    await post_and_drain(client, session["id"], "介绍一下你的能力", auth_headers)
+
+    live = (await client.get("/api/dashboard/live?minutes=30&buckets=30", headers=auth_headers)).json()
+    assert len(live["points"]) == 30
+    assert live["summary"]["runs"] >= 1
+
+    reported = await client.post(
+        "/api/dashboard/client-metric", json={"type": "sse_reconnect"}, headers=auth_headers
+    )
+    assert reported.status_code == 204
+    live2 = (await client.get("/api/dashboard/live", headers=auth_headers)).json()
+    assert live2["summary"]["sse_reconnects"] >= 1
+    # 未知事件类型被忽略，不计入
+    ignored = await client.post(
+        "/api/dashboard/client-metric", json={"type": "bogus"}, headers=auth_headers
+    )
+    assert ignored.status_code == 204
+
+
 async def test_custom_tool_crud_and_ssrf(client, auth_headers):
     created = await client.post(
         "/api/tools/custom",

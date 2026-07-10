@@ -93,6 +93,16 @@ async function download(path: string): Promise<{ blob: Blob; filename: string }>
   return { blob: await resp.blob(), filename };
 }
 
+/** 上报前端观测事件（如 SSE 重连），best-effort，失败静默不影响主流程。 */
+export function reportClientMetric(type: string): void {
+  fetch("/api/dashboard/client-metric", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ type }),
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>

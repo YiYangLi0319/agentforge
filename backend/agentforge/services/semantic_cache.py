@@ -20,9 +20,11 @@ logger = logging.getLogger(__name__)
 
 def _record_cache(hit: bool) -> None:
     try:
+        from agentforge.observability.live import LIVE
         from agentforge.observability.metrics import record_cache
 
         record_cache(hit)
+        LIVE.record_cache(hit)
     except Exception:  # noqa: BLE001 指标失败不影响主流程
         pass
 

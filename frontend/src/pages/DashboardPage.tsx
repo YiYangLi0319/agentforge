@@ -4,14 +4,18 @@ import {
   Cpu,
   Database,
   Gauge,
+  Radio,
   RefreshCw,
+  Repeat,
   ShieldCheck,
   Timer,
   Trash2,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
@@ -26,7 +30,10 @@ import {
 
 import { Badge, Button, formatCost } from "../components/ui";
 import { api } from "../lib/api";
-import type { DashboardStats } from "../lib/types";
+import type { DashboardStats, LiveSeries } from "../lib/types";
+
+const LIVE_MINUTES = 30;
+const LIVE_POLL_MS = 3000;
 
 const KIND_COLORS: Record<string, string> = { chat: "#6366f1", research: "#a855f7" };
 const STATUS_COLORS: Record<string, string> = {
@@ -62,6 +69,9 @@ function Card({
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
+  const [live, setLive] = useState<LiveSeries | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const liveTimer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -72,13 +82,34 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const loadLive = useCallback(async () => {
+    try {
+      setLive(await api.get<LiveSeries>(`/api/dashboard/live?minutes=${LIVE_MINUTES}&buckets=30`));
+    } catch {
+      /* 实时曲线为增强项，失败静默 */
+    }
+  }, []);
+
   useEffect(() => {
     load();
   }, [load]);
 
+  useEffect(() => {
+    if (!autoRefresh) {
+      if (liveTimer.current) window.clearInterval(liveTimer.current);
+      return;
+    }
+    loadLive();
+    liveTimer.current = window.setInterval(loadLive, LIVE_POLL_MS);
+    return () => {
+      if (liveTimer.current) window.clearInterval(liveTimer.current);
+    };
+  }, [autoRefresh, loadLive]);
+
   const clearCache = async () => {
     await api.post("/api/dashboard/cache/clear");
     load();
+    loadLive();
   };
 
   if (!stats) {
@@ -116,6 +147,9 @@ export default function DashboardPage() {
           <Card icon={<Coins size={13} />} label="累计成本" value={formatCost(t.cost)} sub="按模型定价估算" />
           <Card icon={<Timer size={13} />} label="平均延迟" value={`${t.avg_latency_s}s`} sub="每次运行" />
         </div>
+
+        {/* 实时观测 */}
+        <LivePanel live={live} autoRefresh={autoRefresh} onToggle={() => setAutoRefresh((v) => !v)} />
 
         {/* 趋势 */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
@@ -227,6 +261,134 @@ export default function DashboardPage() {
           Prometheus 指标可在 <span className="font-mono text-zinc-500">/api/dashboard/metrics</span> 抓取
         </div>
       </div>
+    </div>
+  );
+}
+
+function LivePanel({
+  live,
+  autoRefresh,
+  onToggle,
+}: {
+  live: LiveSeries | null;
+  autoRefresh: boolean;
+  onToggle: () => void;
+}) {
+  const points = (live?.points ?? []).map((p) => ({
+    ...p,
+    hit_pct: p.hit_rate == null ? null : Math.round(p.hit_rate * 100),
+  }));
+  const s = live?.summary;
+  const hasActivity = points.some((p) => p.runs > 0 || p.cache_hits + p.cache_misses > 0);
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+          <Radio size={15} className={autoRefresh ? "text-emerald-400" : "text-zinc-500"} />
+          实时观测
+          <span className="text-[11px] font-normal text-zinc-500">近 {live?.minutes ?? LIVE_MINUTES} 分钟 · 每 {LIVE_POLL_MS / 1000}s 刷新</span>
+          {autoRefresh && (
+            <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400" title="实时刷新中" />
+          )}
+        </div>
+        <Button size="sm" variant="outline" onClick={onToggle}>
+          {autoRefresh ? "暂停" : "开启"}实时
+        </Button>
+      </div>
+
+      <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <LiveStat label="运行数" value={String(s?.runs ?? 0)} />
+        <LiveStat
+          label="缓存命中率"
+          value={s?.hit_rate == null ? "—" : `${Math.round(s.hit_rate * 100)}%`}
+          sub={s ? `${s.cache_hits} 命中 / ${s.cache_misses} 未命中` : undefined}
+        />
+        <LiveStat label="Tokens" value={(s?.tokens ?? 0).toLocaleString()} />
+        <LiveStat
+          label="SSE 重连"
+          value={String(s?.sse_reconnects ?? 0)}
+          icon={<Repeat size={12} className={s && s.sse_reconnects > 0 ? "text-amber-400" : "text-zinc-600"} />}
+        />
+      </div>
+
+      {!hasActivity ? (
+        <div className="py-8 text-center text-xs text-zinc-600">
+          最近 {live?.minutes ?? LIVE_MINUTES} 分钟暂无活动 —— 发起对话或研究后曲线会实时更新
+        </div>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div>
+            <div className="mb-1 text-[11px] text-zinc-500">缓存命中率（%）</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <LineChart data={points} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                <XAxis dataKey="t" stroke="#71717a" fontSize={10} minTickGap={24} />
+                <YAxis stroke="#71717a" fontSize={10} domain={[0, 100]} />
+                <Tooltip
+                  contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: "#e4e4e7" }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="hit_pct"
+                  name="命中率%"
+                  stroke="#f59e0b"
+                  strokeWidth={2}
+                  dot={false}
+                  connectNulls={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div>
+            <div className="mb-1 text-[11px] text-zinc-500">运行数与 SSE 重连</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <AreaChart data={points} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                <XAxis dataKey="t" stroke="#71717a" fontSize={10} minTickGap={24} />
+                <YAxis stroke="#71717a" fontSize={10} allowDecimals={false} />
+                <Tooltip
+                  contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: "#e4e4e7" }}
+                />
+                <Area type="monotone" dataKey="runs" name="运行数" stroke="#6366f1" fill="#6366f133" strokeWidth={2} />
+                <Area
+                  type="monotone"
+                  dataKey="sse_reconnects"
+                  name="SSE 重连"
+                  stroke="#f43f5e"
+                  fill="#f43f5e22"
+                  strokeWidth={2}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LiveStat({
+  label,
+  value,
+  sub,
+  icon,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/40 px-3 py-2">
+      <div className="flex items-center gap-1 text-[11px] text-zinc-500">
+        {icon}
+        {label}
+      </div>
+      <div className="font-mono text-lg text-zinc-100">{value}</div>
+      {sub && <div className="text-[10px] text-zinc-600">{sub}</div>}
     </div>
   );
 }

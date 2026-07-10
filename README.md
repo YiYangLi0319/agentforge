@@ -29,7 +29,7 @@ AgentForge 是一个**不依赖 LangChain / LangGraph、从协议层开始自研
 - **工具生态**：内置搜索/抓取/计算器/时间等工具 + 可选 Python 执行器和自定义 HTTP 工具；高风险工具默认关闭，生产环境强制禁用宿主级 Python 执行器；
 - **企业级基建**：JWT/API Key 认证、Redis 限流、SSE 持久化重放与自动重连、HITL 审批、Checkpoint、并发准入、重启状态收敛、Alembic 自动迁移、`livez/readyz` 探针、JSON 关联日志；
 - **评估体系**：检索指标 + LLM-as-judge + Agent 完成率 + 确定性引用审计；CLI `--fail-under` 将质量基线变成 CI 可执行门禁；
-- **可观测看板**：用量/成本/延迟趋势、工具使用 Top、缓存命中率、系统能力总览 + Prometheus `/metrics` 导出；
+- **可观测看板**：用量/成本/延迟趋势、工具使用 Top、系统能力总览 + Prometheus `/metrics` 导出；并内置**实时曲线**（近 30 分钟运行数、缓存命中率、SSE 断连重连，前端每 3s 轮询自动刷新）；
 - **平台化/多用户**：自定义 Agent 构建器（人设+工具+知识库）、每用户每日 token 配额、回答赞踩反馈（可导出为评估数据集）、管理后台（用户/用量/成本总览+配额调整）、数据分析 Agent（CSV → Text2SQL → 图表）；
 - **完整前端**：流式聊天、Agent 时间线、审批卡片、知识库、Trace、工具、看板、自定义 Agent、数据分析和管理后台；支持路由级分包、移动端导航、会话搜索/重命名/导出及研究任务刷新恢复。
 
@@ -150,6 +150,7 @@ cd backend
 pytest tests -q          # 65 个测试：引擎/工具/记忆/编排/RAG/研究流水线/API 全离线可跑
 ruff check agentforge tests
 mypy agentforge          # 全量类型检查通过
+python scripts/demo_e2e.py    # 零依赖自包含演示：进程内跑通问答/缓存/研究/可观测
 python scripts/smoke_e2e.py   # 对运行中的服务做端到端验收
 ```
 
@@ -178,6 +179,7 @@ agentforge/
 │   │   └── db/                   # 模型 + 跨方言向量列
 │   ├── alembic/                  # 数据库迁移
 │   ├── samples/kb/               # 演示语料（虚构企业制度/产品文档）
+│   ├── scripts/demo_e2e.py       # 零依赖自包含演示脚本
 │   ├── scripts/smoke_e2e.py      # 端到端验收脚本
 │   └── tests/                    # pytest 套件（全离线）
 ├── frontend/                     # React 18 + TS + Tailwind v4
