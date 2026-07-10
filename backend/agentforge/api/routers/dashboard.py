@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentforge.api.app import Container
 from agentforge.api.deps import get_container, get_current_user, get_db
-from agentforge.db.models import Run, Span, User
+from agentforge.db.models import EvalRecord, Run, Span, User
 from agentforge.observability.live import LIVE
 from agentforge.observability.metrics import record_client_event, render_metrics
 
@@ -106,6 +106,41 @@ async def dashboard_stats(
             },
         },
     }
+
+
+@router.get("/evals")
+async def dashboard_evals(
+    limit: int = Query(default=40, ge=1, le=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """评估回归：按 suite 分组返回最近的评估记录（时间正序），供前端画质量趋势。
+
+    评估记录是系统级（由 CLI/CI 的评估运行器写入），非按用户隔离。
+    """
+    rows = (
+        (await db.execute(select(EvalRecord).order_by(EvalRecord.created_at.desc()).limit(limit)))
+        .scalars()
+        .all()
+    )
+    suites: dict[str, list[dict]] = defaultdict(list)
+    for record in reversed(rows):  # 变为时间正序
+        numeric = {
+            k: v
+            for k, v in (record.metrics or {}).items()
+            if isinstance(v, int | float) and not isinstance(v, bool) and k != "cases"
+        }
+        suites[record.suite].append(
+            {
+                "id": record.id,
+                "dataset": record.dataset,
+                "metrics": numeric,
+                "cases": (record.metrics or {}).get("cases"),
+                "enabled_judge": record.enabled_judge,
+                "created_at": record.created_at.isoformat(),
+            }
+        )
+    return {"suites": dict(suites)}
 
 
 @router.get("/live")

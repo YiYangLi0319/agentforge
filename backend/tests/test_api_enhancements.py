@@ -143,6 +143,36 @@ async def test_dashboard_live_and_client_metric(client, auth_headers):
     assert ignored.status_code == 204
 
 
+async def test_dashboard_evals_grouped_by_suite(app, client, auth_headers):
+    from datetime import UTC, datetime, timedelta
+
+    from agentforge.db.models import EvalRecord
+
+    now = datetime.now(UTC)
+    container = app.state.container
+    async with container.sessions() as db:
+        db.add(EvalRecord(suite="retrieval", dataset="retrieval_zh.jsonl",
+                          metrics={"recall@5": 0.8, "mrr": 0.7, "cases": 5}, detail=[],
+                          created_at=now - timedelta(minutes=2)))
+        db.add(EvalRecord(suite="retrieval", dataset="retrieval_zh.jsonl",
+                          metrics={"recall@5": 0.9, "mrr": 0.75, "cases": 5}, detail=[],
+                          created_at=now - timedelta(minutes=1)))
+        db.add(EvalRecord(suite="rag", dataset="rag_zh.jsonl",
+                          metrics={"citation_integrity": 1.0, "cases": 3}, detail=[],
+                          enabled_judge=True, created_at=now))
+        await db.commit()
+
+    data = (await client.get("/api/dashboard/evals", headers=auth_headers)).json()
+    suites = data["suites"]
+    assert len(suites["retrieval"]) == 2
+    # 时间正序：第一条在前
+    assert suites["retrieval"][0]["metrics"]["recall@5"] == 0.8
+    # 计数类指标 cases 从 metrics 中剥离，单列
+    assert "cases" not in suites["retrieval"][0]["metrics"]
+    assert suites["retrieval"][0]["cases"] == 5
+    assert suites["rag"][0]["enabled_judge"] is True
+
+
 async def test_custom_tool_crud_and_ssrf(client, auth_headers):
     created = await client.post(
         "/api/tools/custom",

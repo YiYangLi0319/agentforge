@@ -30,6 +30,32 @@ def kv(label: str, value: str) -> None:
     print(f"  - {label}: {value}")
 
 
+async def run_eval_snapshot(settings) -> dict | None:
+    """在应用启动前用同一 DB 跑一次检索评估并落库，供看板"评估回归"面板展示。
+
+    评估器自带独立引擎，跑完即关闭，避免与应用并发访问同一 SQLite 文件。
+    """
+    try:
+        from agentforge.evals.runner import (
+            DATASETS_DIR,
+            EvalContext,
+            persist_record,
+            run_retrieval_suite,
+        )
+
+        ectx = EvalContext(settings)
+        await ectx.setup()
+        try:
+            result = await run_retrieval_suite(ectx, DATASETS_DIR / "retrieval_zh.jsonl", top_k=5)
+            await persist_record(ectx, result, used_judge=False)
+            return result
+        finally:
+            await ectx.close()
+    except Exception as exc:  # noqa: BLE001 评估为增强项，失败不影响主演示
+        print(f"[提示] 评估快照已跳过：{exc}")
+        return None
+
+
 async def _drain(client, run_id: str, headers: dict, timeout: float = 60.0) -> dict:
     deadline = time.perf_counter() + timeout
     while time.perf_counter() < deadline:
@@ -40,7 +66,7 @@ async def _drain(client, run_id: str, headers: dict, timeout: float = 60.0) -> d
     raise TimeoutError(f"运行 {run_id} 未在 {timeout}s 内结束")
 
 
-async def run_demo(client) -> None:
+async def run_demo(client, eval_result: dict | None) -> None:
     hr("1) 注册并登录")
     await client.post("/api/auth/register", json={"username": "demo", "password": "demo12345"})
     login = await client.post("/api/auth/login", json={"username": "demo", "password": "demo12345"})
@@ -115,7 +141,15 @@ async def run_demo(client) -> None:
     for line in head[:6]:
         print(f"    | {line}")
 
-    hr("6) 可观测：聚合统计 + 实时曲线")
+    hr("6) 评估回归（检索指标快照）")
+    if eval_result:
+        m = eval_result["metrics"]
+        kv("数据集", eval_result["dataset"])
+        kv("指标", " · ".join(f"{k}={v}" for k, v in m.items()))
+    else:
+        kv("评估", "本次未生成（可运行 python -m agentforge.evals.runner all）")
+
+    hr("7) 可观测：聚合统计 + 实时曲线 + 评估趋势")
     stats = (await client.get("/api/dashboard/stats", headers=headers)).json()
     tot = stats["totals"]
     kv("总运行", f"{tot['runs']}（成功率 {tot['success_rate'] * 100:.0f}%）")
@@ -125,8 +159,10 @@ async def run_demo(client) -> None:
     ls = live["summary"]
     hit_rate = "—" if ls["hit_rate"] is None else f"{ls['hit_rate'] * 100:.0f}%"
     kv("近30分钟", f"运行 {ls['runs']} · 缓存命中率 {hit_rate} · SSE 重连 {ls['sse_reconnects']}")
+    evals = (await client.get("/api/dashboard/evals", headers=headers)).json()
+    kv("评估记录", " / ".join(f"{suite}:{len(recs)}条" for suite, recs in evals["suites"].items()) or "无")
 
-    hr("7) Prometheus 指标摘录（/api/dashboard/metrics）")
+    hr("8) Prometheus 指标摘录（/api/dashboard/metrics）")
     metrics_text = (await client.get("/api/dashboard/metrics")).text
     shown = [
         ln
@@ -159,11 +195,13 @@ async def main() -> None:
         semantic_cache_enabled=True,
     )
     print(f"AgentForge 端到端演示（临时目录 {tmp}）")
+    # 应用启动前先跑一次评估快照（独立引擎，避免与应用并发访问同一 SQLite）
+    eval_result = await run_eval_snapshot(settings)
     app = create_app(settings)
     async with LifespanManager(app, startup_timeout=30, shutdown_timeout=30):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://demo") as client:
-            await run_demo(client)
+            await run_demo(client, eval_result)
 
 
 if __name__ == "__main__":

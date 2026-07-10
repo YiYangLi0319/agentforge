@@ -30,10 +30,12 @@ import {
 
 import { Badge, Button, formatCost } from "../components/ui";
 import { api } from "../lib/api";
-import type { DashboardStats, LiveSeries } from "../lib/types";
+import type { DashboardStats, EvalSuites, LiveSeries } from "../lib/types";
 
 const LIVE_MINUTES = 30;
 const LIVE_POLL_MS = 3000;
+const METRIC_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#a855f7", "#f43f5e", "#06b6d4"];
+const SUITE_LABEL: Record<string, string> = { retrieval: "检索", rag: "RAG 问答", agent: "Agent 任务" };
 
 const KIND_COLORS: Record<string, string> = { chat: "#6366f1", research: "#a855f7" };
 const STATUS_COLORS: Record<string, string> = {
@@ -70,13 +72,19 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [live, setLive] = useState<LiveSeries | null>(null);
+  const [evals, setEvals] = useState<EvalSuites | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const liveTimer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setStats(await api.get<DashboardStats>("/api/dashboard/stats"));
+      const [s, e] = await Promise.all([
+        api.get<DashboardStats>("/api/dashboard/stats"),
+        api.get<EvalSuites>("/api/dashboard/evals").catch(() => ({ suites: {} }) as EvalSuites),
+      ]);
+      setStats(s);
+      setEvals(e);
     } finally {
       setLoading(false);
     }
@@ -257,6 +265,9 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* 评估回归 */}
+        <EvalPanel evals={evals} />
+
         <div className="text-center text-[11px] text-zinc-600">
           Prometheus 指标可在 <span className="font-mono text-zinc-500">/api/dashboard/metrics</span> 抓取
         </div>
@@ -368,6 +379,106 @@ function LivePanel({
       )}
     </div>
   );
+}
+
+function EvalPanel({ evals }: { evals: EvalSuites | null }) {
+  const suites = Object.entries(evals?.suites ?? {}).filter(([, recs]) => recs.length > 0);
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-medium text-zinc-200">
+        <Gauge size={15} className="text-sky-400" /> 评估回归
+        <span className="text-[11px] font-normal text-zinc-500">检索/RAG/Agent 质量随每次评估的趋势</span>
+      </div>
+      {suites.length === 0 ? (
+        <div className="py-8 text-center text-xs text-zinc-600">
+          尚无评估记录 —— 运行{" "}
+          <span className="font-mono text-zinc-500">python -m agentforge.evals.runner all</span>{" "}
+          生成质量趋势
+        </div>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {suites.map(([suite, recs]) => (
+            <EvalSuiteCard key={suite} suite={suite} records={recs} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EvalSuiteCard({
+  suite,
+  records,
+}: {
+  suite: string;
+  records: EvalSuites["suites"][string];
+}) {
+  const keys = Array.from(new Set(records.flatMap((r) => Object.keys(r.metrics))));
+  // 只把取值恒在 [0,1] 的比率型指标画成百分比曲线，其余（如 latency_ms）仅展示最新值
+  const ratioKeys = keys.filter((k) => records.every((r) => (r.metrics[k] ?? 0) <= 1.0001));
+  const chartData = records.map((r, i) => {
+    const point: Record<string, number | string | null> = {
+      idx: `#${i + 1}`,
+    };
+    for (const k of ratioKeys) {
+      point[k] = r.metrics[k] == null ? null : Math.round(r.metrics[k] * 1000) / 10;
+    }
+    return point;
+  });
+  const latest = records[records.length - 1];
+
+  return (
+    <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/40 p-3">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-[13px] font-medium text-zinc-200">{SUITE_LABEL[suite] ?? suite}</span>
+        <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+          {records.length} 次 · {latest.dataset}
+          {latest.enabled_judge && <Badge tone="indigo">judge</Badge>}
+        </span>
+      </div>
+      {ratioKeys.length > 0 && (
+        <ResponsiveContainer width="100%" height={150}>
+          <LineChart data={chartData} margin={{ top: 5, right: 10, left: -22, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+            <XAxis dataKey="idx" stroke="#71717a" fontSize={10} />
+            <YAxis stroke="#71717a" fontSize={10} domain={[0, 100]} />
+            <Tooltip
+              contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 }}
+              labelStyle={{ color: "#e4e4e7" }}
+            />
+            {ratioKeys.map((k, i) => (
+              <Line
+                key={k}
+                type="monotone"
+                dataKey={k}
+                name={k}
+                stroke={METRIC_COLORS[i % METRIC_COLORS.length]}
+                strokeWidth={2}
+                dot={false}
+                connectNulls
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {keys.map((k) => (
+          <span
+            key={k}
+            className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400"
+          >
+            {k} <span className="font-mono text-zinc-200">{formatMetric(latest.metrics[k])}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatMetric(v: number | undefined): string {
+  if (v == null) return "—";
+  if (v <= 1.0001) return `${Math.round(v * 1000) / 10}%`;
+  return String(Math.round(v * 100) / 100);
 }
 
 function LiveStat({

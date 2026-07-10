@@ -133,6 +133,19 @@ export interface LiveSeries {
   };
 }
 
+export interface EvalRecordInfo {
+  id: string;
+  dataset: string;
+  metrics: Record<string, number>;
+  cases: number | null;
+  enabled_judge: boolean;
+  created_at: string;
+}
+
+export interface EvalSuites {
+  suites: Record<string, EvalRecordInfo[]>;
+}
+
 export interface BuiltinTool {
   name: string;
   description: string;
