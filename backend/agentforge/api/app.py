@@ -102,7 +102,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             embeddings=embeddings,
             run_manager=run_manager,
             limiter=await build_limiter(settings),
-            retriever=HybridRetriever(sessions, embeddings, build_reranker(settings)),
+            retriever=HybridRetriever(
+                sessions,
+                embeddings,
+                build_reranker(settings),
+                json_scan_limit=settings.rag_json_scan_limit,
+            ),
             search=build_search_provider(settings.tavily_api_key, settings.search_provider),
             memory_store=DBMemoryStore(sessions),
             guardrails=GuardrailsEngine(

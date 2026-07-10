@@ -61,6 +61,8 @@ export default function ResearchPage() {
   const [historyError, setHistoryError] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(false);
   const abortRef = useRef<(() => void) | null>(null);
+  // 请求代次：发起研究/切换历史时自增，异步回调据此丢弃过期结果，消除竞态。
+  const genRef = useRef(0);
 
   const loadHistory = useCallback((search = "") => {
     const suffix = search.trim() ? `?q=${encodeURIComponent(search.trim())}` : "";
@@ -163,24 +165,30 @@ export default function ResearchPage() {
   const start = async () => {
     const q = query.trim();
     if (q.length < 4 || running) return;
+    const gen = ++genRef.current;
+    abortRef.current?.();
     reset();
     setRunning(true);
     try {
       const resp = await api.post<{ run_id: string; report_id: string }>("/api/research", { query: q });
+      if (gen !== genRef.current) return;
       setRunId(resp.run_id);
       setViewing(resp.report_id);
       abortRef.current = streamRunEvents(resp.run_id, {
-        onEvent: handleEvent,
+        onEvent: (ev) => gen === genRef.current && handleEvent(ev),
         onDone: () => {
+          if (gen !== genRef.current) return;
           setRunning(false);
           loadHistory();
         },
         onError: () => {
+          if (gen !== genRef.current) return;
           setRunning(false);
           setError("事件流中断，可稍后在历史记录中查看结果");
         },
       });
     } catch (e) {
+      if (gen !== genRef.current) return;
       setRunning(false);
       setError(e instanceof Error ? e.message : "发起失败");
     }
@@ -199,6 +207,7 @@ export default function ResearchPage() {
   };
 
   const openHistory = async (id: string) => {
+    const gen = ++genRef.current;
     abortRef.current?.();
     reset();
     setViewing(id);
@@ -206,6 +215,7 @@ export default function ResearchPage() {
     setLoadingHistory(true);
     try {
       const r = await api.get<ResearchReportInfo>(`/api/research/${id}`);
+      if (gen !== genRef.current) return;
       setRunId(r.run_id);
       setPlan(r.plan && r.plan.sub_questions ? r.plan : null);
       setReportText(r.report_md ?? "");
@@ -228,12 +238,14 @@ export default function ResearchPage() {
       if (["pending", "running", "awaiting_approval", "resuming"].includes(r.status)) {
         setRunning(true);
         abortRef.current = streamRunEvents(r.run_id, {
-          onEvent: handleEvent,
+          onEvent: (ev) => gen === genRef.current && handleEvent(ev),
           onDone: () => {
+            if (gen !== genRef.current) return;
             setRunning(false);
             loadHistory();
           },
           onError: () => {
+            if (gen !== genRef.current) return;
             setRunning(false);
             setError("事件流恢复失败，请稍后重试");
           },
@@ -242,9 +254,10 @@ export default function ResearchPage() {
         setPhase(r.status);
       }
     } catch (reason) {
+      if (gen !== genRef.current) return;
       setError(reason instanceof Error ? reason.message : "加载研究报告失败");
     } finally {
-      setLoadingHistory(false);
+      if (gen === genRef.current) setLoadingHistory(false);
     }
   };
 

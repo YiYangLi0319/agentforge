@@ -131,6 +131,21 @@ async def test_hybrid_retriever_sqlite_end_to_end(tmp_path):
     await engine.dispose()
 
 
+async def test_json_vector_scan_prefilter_bounds_scan(tmp_path):
+    """JSON 降级模式超过扫描上限时，改用 BM25 候选预筛仍能召回相关块。"""
+    engine = build_engine(f"sqlite+aiosqlite:///{tmp_path}/rag_scan.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kb_id = await _seed_kb(sessions)
+
+    # 上限设为 1（远小于 3 个块），强制走候选预筛路径
+    retriever = HybridRetriever(sessions, MockEmbeddings(dim=64), json_scan_limit=1)
+    results = await retriever.search([kb_id], "报销单提交时限是多久", top_k=2, mode="vector")
+    assert results and any("30 天" in r.content for r in results)
+    await engine.dispose()
+
+
 def test_citation_registry_and_extraction():
     from agentforge.rag.retriever import RetrievedChunk
 

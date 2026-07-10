@@ -148,11 +148,29 @@ async def get_session(
             .limit(1)
         )
     ).first()
+    # 无进行中任务时，暴露最近一个可从 checkpoint 恢复的中断 chat run
+    resumable_run: dict | None = None
+    if active_run is None:
+        row = (
+            await db.execute(
+                select(Run.id, Run.checkpoint)
+                .where(
+                    Run.session_id == session_id,
+                    Run.kind == "chat",
+                    Run.status == "interrupted",
+                )
+                .order_by(desc(Run.created_at))
+                .limit(1)
+            )
+        ).first()
+        if row is not None and (row.checkpoint or {}).get("messages"):
+            resumable_run = {"id": row.id}
     return {
         **_session_dict(s),
         "active_run": (
             {"id": active_run.id, "status": active_run.status} if active_run else None
         ),
+        "resumable_run": resumable_run,
         "messages": [
             {
                 "id": m.id,

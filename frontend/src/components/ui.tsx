@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { Loader2 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 export function Button({
   children,
@@ -117,6 +117,65 @@ export const STATUS_LABEL: Record<string, string> = {
   resumed: "已恢复",
   resuming: "恢复中",
 };
+
+/**
+ * 基于原生 <dialog> 的可访问模态框：自带焦点约束、Esc 关闭与关闭后焦点归还，
+ * 避免手写焦点陷阱的遗漏。点击背景（::backdrop）也会关闭。
+ */
+export function Modal({
+  open,
+  onClose,
+  labelledBy,
+  className,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  labelledBy?: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (open && !el.open) el.showModal();
+    else if (!open && el.open) el.close();
+  }, [open]);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onCancel = (e: Event) => {
+      e.preventDefault();
+      onClose();
+    };
+    const onClick = (e: MouseEvent) => {
+      if (e.target === el) onClose(); // 点击背景关闭
+    };
+    el.addEventListener("cancel", onCancel);
+    el.addEventListener("click", onClick);
+    return () => {
+      el.removeEventListener("cancel", onCancel);
+      el.removeEventListener("click", onClick);
+    };
+  }, [onClose]);
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={labelledBy}
+      className={clsx(
+        "m-auto w-full max-w-[420px] rounded-2xl border border-zinc-800 bg-zinc-900 p-5 text-zinc-200",
+        "backdrop:bg-black/60",
+        className,
+      )}
+    >
+      {open && children}
+    </dialog>
+  );
+}
 
 export function EmptyState({ icon, title, desc }: { icon: ReactNode; title: string; desc?: string }) {
   return (

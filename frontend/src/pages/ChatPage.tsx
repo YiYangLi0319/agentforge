@@ -5,6 +5,7 @@ import {
   MessageSquarePlus,
   MessagesSquare,
   Pencil,
+  RotateCcw,
   Search,
   SendHorizonal,
   ShieldQuestion,
@@ -18,7 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import AgentTimeline, { reduceTimeline, type TimelineItem } from "../components/AgentTimeline";
 import Markdown from "../components/Markdown";
-import { Badge, Button, EmptyState, formatCost } from "../components/ui";
+import { Badge, Button, EmptyState, Modal, formatCost } from "../components/ui";
 import { api } from "../lib/api";
 import { streamRunEvents } from "../lib/sse";
 import type {
@@ -64,10 +65,13 @@ export default function ChatPage() {
   const [editingTitle, setEditingTitle] = useState("");
   const [pageError, setPageError] = useState("");
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  const [resumableRun, setResumableRun] = useState<{ id: string } | null>(null);
 
   const abortRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const runIdRef = useRef<string | null>(null);
+  // 请求代次：切换会话/发送时自增，异步回调据此丢弃过期结果，消除竞态。
+  const genRef = useRef(0);
   const activeSession = sessions.find((s) => s.id === activeId);
 
   const loadSessions = useCallback(async (search = "") => {
@@ -97,24 +101,31 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!activeId) return;
+    const gen = ++genRef.current;
     abortRef.current?.();
     setStreamText("");
     setTimeline([]);
     setApprovals([]);
     setRunning(false);
     setActiveRun(null);
+    setResumableRun(null);
     setRunId(null);
     runIdRef.current = null;
     api
-      .get<{ messages: ChatMessageInfo[]; active_run: ActiveRun | null }>(
-        `/api/chat/sessions/${activeId}`,
-      )
+      .get<{
+        messages: ChatMessageInfo[];
+        active_run: ActiveRun | null;
+        resumable_run: { id: string } | null;
+      }>(`/api/chat/sessions/${activeId}`)
       .then((d) => {
+        if (gen !== genRef.current) return;
         setMessages(d.messages);
         setActiveRun(d.active_run);
+        setResumableRun(d.resumable_run);
         setPageError("");
       })
       .catch((error) => {
+        if (gen !== genRef.current) return;
         setMessages([]);
         setPageError(error instanceof Error ? error.message : "加载消息失败");
       });
@@ -197,12 +208,14 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!activeRun) return;
+    const gen = genRef.current;
     setRunId(activeRun.id);
     runIdRef.current = activeRun.id;
     setRunning(true);
     abortRef.current = streamRunEvents(activeRun.id, {
       onEvent: handleEvent,
       onError: () => {
+        if (gen !== genRef.current) return;
         setRunning(false);
         setPageError("事件流恢复失败，请刷新会话查看最终结果");
       },
@@ -213,8 +226,10 @@ export default function ChatPage() {
   const send = async () => {
     const content = input.trim();
     if (!content || running || !activeId) return;
+    const gen = genRef.current;
     const optimisticId = `u-${Date.now()}`;
     setInput("");
+    setResumableRun(null);
     setMessages((m) => [
       ...m,
       {
@@ -233,6 +248,7 @@ export default function ChatPage() {
       const resp = await api.post<{ run_id: string }>(`/api/chat/sessions/${activeId}/messages`, {
         content,
       });
+      if (gen !== genRef.current) return; // 已切换会话，放弃在当前视图订阅
       setRunId(resp.run_id);
       runIdRef.current = resp.run_id;
       abortRef.current = streamRunEvents(resp.run_id, {
@@ -241,6 +257,7 @@ export default function ChatPage() {
       });
       loadSessions();
     } catch (e) {
+      if (gen !== genRef.current) return;
       setRunning(false);
       setMessages((m) => [
         ...m.filter((message) => message.id !== optimisticId),
@@ -252,6 +269,20 @@ export default function ChatPage() {
           created_at: new Date().toISOString(),
         },
       ]);
+    }
+  };
+
+  const resumeRun = async () => {
+    if (!resumableRun) return;
+    const gen = genRef.current;
+    try {
+      const resp = await api.post<{ run_id: string }>(`/api/runs/${resumableRun.id}/resume`, {});
+      if (gen !== genRef.current) return;
+      setResumableRun(null);
+      setActiveRun({ id: resp.run_id, status: "running" });
+    } catch (error) {
+      if (gen !== genRef.current) return;
+      setPageError(error instanceof Error ? error.message : "恢复失败");
     }
   };
 
@@ -446,6 +477,14 @@ export default function ChatPage() {
         )}
         {activeId ? (
           <>
+            {resumableRun && !running && !activeRun && (
+              <div className="flex items-center justify-between gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-200">
+                <span>上一轮对话因服务重启被中断，可从断点继续。</span>
+                <Button size="sm" variant="outline" onClick={resumeRun}>
+                  <RotateCcw size={13} /> 恢复
+                </Button>
+              </div>
+            )}
             <div className="flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-5">
               <div className="mx-auto max-w-3xl space-y-5">
                 {messages.map((m) => (
@@ -549,18 +588,11 @@ export default function ChatPage() {
       </div>
 
       {/* 新建对话弹窗 */}
-      {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowCreate(false)}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="create-chat-title"
-            className="mx-3 w-full max-w-[420px] rounded-2xl border border-zinc-800 bg-zinc-900 p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 id="create-chat-title" className="mb-4 text-sm font-semibold text-zinc-100">
-              新建对话
-            </h3>
+      <Modal open={showCreate} onClose={() => setShowCreate(false)} labelledBy="create-chat-title" className="mx-3">
+        <h3 id="create-chat-title" className="mb-4 text-sm font-semibold text-zinc-100">
+          新建对话
+        </h3>
+        <div>
             <div className="mb-3">
               <div className="mb-1.5 text-xs text-zinc-500">Agent 模式</div>
               <div className="grid grid-cols-3 gap-2">
@@ -643,9 +675,8 @@ export default function ChatPage() {
               </Button>
               <Button onClick={createSession}>创建</Button>
             </div>
-          </div>
         </div>
-      )}
+      </Modal>
     </div>
   );
 }

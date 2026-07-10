@@ -90,7 +90,7 @@ sequenceDiagram
 
 - **中文适配**：BM25 建立在 jieba 搜索粒度分词 + 停用词过滤上（英文统一小写），这是中文场景相对"字符 n-gram"或空格分词的关键提升点；
 - **BM25 自研**（Okapi 公式，倒排索引），按知识库缓存索引（chunk 计数变化即失效重建）；
-- **双方言**：PostgreSQL 用 `embedding <=> CAST(:emb AS vector)` 原生检索；SQLite 自动降级进程内余弦，评分口径一致，保证轻量模式与测试可用；
+- **双方言**：PostgreSQL 用 `embedding <=> CAST(:emb AS vector)` 原生检索；SQLite/无 pgvector 自动降级进程内余弦，评分口径一致。降级模式对整库规模设扫描上限（`rag_json_scan_limit`），超限改用 BM25 候选预筛，避免把整库 embedding 载入内存排序（大规模仍建议启用原生 pgvector）；
 - **引用可信度**：来源注册表统一编号 [n]，同时保存服务端证据正文与 `verified` provenance；确定性审计检查无效编号、事实句覆盖率和原文读取比例，未知编号不会被前端渲染成可信角标。生成式上下文压缩只有在输出可定位为原文子串时才接受。
 
 ## 4. 深度研究流水线（`agents/deep_research.py`）

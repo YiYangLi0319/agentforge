@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     rag_hyde: bool = False
     rag_compression: bool = False
     rag_parent_child: bool = True
+    # JSON 降级模式（无 pgvector）下向量检索的进程内全量扫描上限；
+    # 超过则改用 BM25 候选预筛，避免把整库 embedding 载入内存排序。
+    rag_json_scan_limit: int = 5000
 
     # MCP：JSON 配置文件路径（描述要接入的 MCP 服务器），为空则不启用
     mcp_config_path: str = ""
