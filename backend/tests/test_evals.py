@@ -3,6 +3,7 @@
 import pytest
 
 from agentforge.core.llm.mock import MockChatModel
+from agentforge.evals.gates import DEFAULT_GATES, gate_specs, gate_status
 from agentforge.evals.judge import judge_answer, judge_task
 from agentforge.evals.metrics import aggregate, hit_rate_at_k, mrr, ndcg_at_k, recall_at_k
 from agentforge.evals.runner import threshold_failures
@@ -29,6 +30,22 @@ def test_eval_threshold_gate():
     assert threshold_failures(result, ["recall@5=0.8"]) == []
     assert threshold_failures(result, ["mrr=0.7"]) == ["mrr=0.6 低于阈值 0.7"]
     assert "不存在" in threshold_failures(result, ["citation=0.8"])[0]
+
+
+def test_gate_specs_and_status_single_source():
+    # gate_specs 与 threshold_failures 组成默认质量门（CLI 未显式指定时回退）
+    specs = gate_specs("retrieval")
+    assert set(specs) == {"recall@5=0.8", "mrr=0.7"}
+    assert threshold_failures({"metrics": {"recall@5": 0.9, "mrr": 0.75}}, specs) == []
+
+    passing = gate_status("retrieval", {"recall@5": 0.8, "mrr": 0.7})
+    assert passing["passed"] is True
+    failing = gate_status("retrieval", {"recall@5": 0.5, "mrr": 0.9})
+    assert failing["passed"] is False
+    # 门限指标缺失 → 无法判定
+    assert gate_status("retrieval", {"hit_rate@5": 1.0})["passed"] is None
+    # 与看板同源
+    assert gate_status.__module__.endswith("gates") and "retrieval" in DEFAULT_GATES
 
 
 async def test_judge_answer_structured():

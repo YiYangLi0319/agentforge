@@ -22,6 +22,7 @@ import {
   Cell,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -81,7 +82,9 @@ export default function DashboardPage() {
     try {
       const [s, e] = await Promise.all([
         api.get<DashboardStats>("/api/dashboard/stats"),
-        api.get<EvalSuites>("/api/dashboard/evals").catch(() => ({ suites: {} }) as EvalSuites),
+        api
+          .get<EvalSuites>("/api/dashboard/evals")
+          .catch(() => ({ suites: {}, gates: {} }) as EvalSuites),
       ]);
       setStats(s);
       setEvals(e);
@@ -398,7 +401,7 @@ function EvalPanel({ evals }: { evals: EvalSuites | null }) {
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {suites.map(([suite, recs]) => (
-            <EvalSuiteCard key={suite} suite={suite} records={recs} />
+            <EvalSuiteCard key={suite} suite={suite} records={recs} gates={evals?.gates?.[suite] ?? {}} />
           ))}
         </div>
       )}
@@ -409,9 +412,11 @@ function EvalPanel({ evals }: { evals: EvalSuites | null }) {
 function EvalSuiteCard({
   suite,
   records,
+  gates,
 }: {
   suite: string;
   records: EvalSuites["suites"][string];
+  gates: Record<string, number>;
 }) {
   const keys = Array.from(new Set(records.flatMap((r) => Object.keys(r.metrics))));
   // 只把取值恒在 [0,1] 的比率型指标画成百分比曲线，其余（如 latency_ms）仅展示最新值
@@ -426,11 +431,20 @@ function EvalSuiteCard({
     return point;
   });
   const latest = records[records.length - 1];
+  // 命中门限的比率型指标 → 画基线；门限值同 CI/CLI
+  const gatedLines = ratioKeys
+    .filter((k) => gates[k] != null)
+    .map((k, i) => ({ key: k, y: Math.round(gates[k] * 1000) / 10, color: METRIC_COLORS[i % METRIC_COLORS.length] }));
+  const gateTone = latest.passed === true ? "green" : latest.passed === false ? "red" : "zinc";
+  const gateText = latest.passed === true ? "达标" : latest.passed === false ? "未达标" : "无门限";
 
   return (
     <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/40 p-3">
       <div className="mb-1 flex items-center justify-between">
-        <span className="text-[13px] font-medium text-zinc-200">{SUITE_LABEL[suite] ?? suite}</span>
+        <span className="flex items-center gap-1.5 text-[13px] font-medium text-zinc-200">
+          {SUITE_LABEL[suite] ?? suite}
+          <Badge tone={gateTone}>质量门 {gateText}</Badge>
+        </span>
         <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
           {records.length} 次 · {latest.dataset}
           {latest.enabled_judge && <Badge tone="indigo">judge</Badge>}
@@ -446,6 +460,16 @@ function EvalSuiteCard({
               contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 }}
               labelStyle={{ color: "#e4e4e7" }}
             />
+            {gatedLines.map((g) => (
+              <ReferenceLine
+                key={`gate-${g.key}`}
+                y={g.y}
+                stroke={g.color}
+                strokeDasharray="4 4"
+                strokeOpacity={0.5}
+                label={{ value: `门限 ${g.key}`, position: "insideTopRight", fill: g.color, fontSize: 9 }}
+              />
+            ))}
             {ratioKeys.map((k, i) => (
               <Line
                 key={k}
@@ -465,9 +489,17 @@ function EvalSuiteCard({
         {keys.map((k) => (
           <span
             key={k}
-            className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400"
+            className={
+              "rounded border px-1.5 py-0.5 text-[10px] " +
+              (gates[k] != null
+                ? latest.metrics[k] != null && latest.metrics[k] >= gates[k]
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-rose-500/40 bg-rose-500/10 text-rose-300"
+                : "border-zinc-800 bg-zinc-900 text-zinc-400")
+            }
+            title={gates[k] != null ? `质量门 ≥ ${formatMetric(gates[k])}` : undefined}
           >
-            {k} <span className="font-mono text-zinc-200">{formatMetric(latest.metrics[k])}</span>
+            {k} <span className="font-mono">{formatMetric(latest.metrics[k])}</span>
           </span>
         ))}
       </div>

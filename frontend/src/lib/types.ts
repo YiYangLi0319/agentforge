@@ -140,10 +140,12 @@ export interface EvalRecordInfo {
   cases: number | null;
   enabled_judge: boolean;
   created_at: string;
+  passed: boolean | null;
 }
 
 export interface EvalSuites {
   suites: Record<string, EvalRecordInfo[]>;
+  gates: Record<string, Record<string, number>>;
 }
 
 export interface BuiltinTool {

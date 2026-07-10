@@ -30,6 +30,7 @@ from agentforge.core.tools.python_sandbox import python_execute
 from agentforge.core.tools.retrieval import search_knowledge_base
 from agentforge.db.base import build_engine, build_sessionmaker, init_db
 from agentforge.db.models import Chunk, Document, EvalRecord, KnowledgeBase, User
+from agentforge.evals.gates import gate_specs
 from agentforge.evals.judge import judge_answer, judge_task
 from agentforge.evals.metrics import aggregate, hit_rate_at_k, mrr, ndcg_at_k, recall_at_k
 from agentforge.rag.citations import audit_citations
@@ -350,7 +351,8 @@ async def main() -> None:
             )
             await persist_record(ectx, result, used_judge=suite in ("rag", "agent"))
             print(f"  报告已写入: {report_path}\n")
-            failures = threshold_failures(result, args.fail_under)
+            specs = args.fail_under or gate_specs(suite)  # 未显式指定时回退到默认质量门
+            failures = threshold_failures(result, specs)
             if failures:
                 raise SystemExit("评估质量门失败：" + "；".join(failures))
     finally:

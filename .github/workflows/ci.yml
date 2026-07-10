@@ -33,6 +33,7 @@ jobs:
         run: pytest tests -q --cov=agentforge --cov-report=term-missing:skip-covered
 
       - name: Offline eval pipeline smoke
+        # 阈值与 agentforge/evals/gates.py 的 DEFAULT_GATES 同源；省略 --fail-under 即用默认门
         run: >-
           python -m agentforge.evals.runner retrieval
           --fail-under "recall@5=0.8"

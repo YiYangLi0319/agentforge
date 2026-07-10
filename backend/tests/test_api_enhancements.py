@@ -172,6 +172,12 @@ async def test_dashboard_evals_grouped_by_suite(app, client, auth_headers):
     assert suites["retrieval"][0]["cases"] == 5
     assert suites["rag"][0]["enabled_judge"] is True
 
+    # 质量门：与 CI/CLI 同源，看板据此判定并画基线
+    assert data["gates"]["retrieval"] == {"recall@5": 0.8, "mrr": 0.7}
+    assert suites["retrieval"][0]["passed"] is True  # recall@5=0.8, mrr=0.7 恰好达标
+    # rag 记录缺少门限指标（只有 citation_integrity，非 *_rate）→ 无法判定
+    assert suites["rag"][0]["passed"] is None
+
 
 async def test_custom_tool_crud_and_ssrf(client, auth_headers):
     created = await client.post(

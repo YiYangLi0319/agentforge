@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agentforge.api.app import Container
 from agentforge.api.deps import get_container, get_current_user, get_db
 from agentforge.db.models import EvalRecord, Run, Span, User
+from agentforge.evals.gates import DEFAULT_GATES, gate_status
 from agentforge.observability.live import LIVE
 from agentforge.observability.metrics import record_client_event, render_metrics
 
@@ -124,23 +125,29 @@ async def dashboard_evals(
         .all()
     )
     suites: dict[str, list[dict]] = defaultdict(list)
+    used_suites: set[str] = set()
     for record in reversed(rows):  # 变为时间正序
+        metrics = record.metrics or {}
         numeric = {
             k: v
-            for k, v in (record.metrics or {}).items()
+            for k, v in metrics.items()
             if isinstance(v, int | float) and not isinstance(v, bool) and k != "cases"
         }
+        used_suites.add(record.suite)
         suites[record.suite].append(
             {
                 "id": record.id,
                 "dataset": record.dataset,
                 "metrics": numeric,
-                "cases": (record.metrics or {}).get("cases"),
+                "cases": metrics.get("cases"),
                 "enabled_judge": record.enabled_judge,
                 "created_at": record.created_at.isoformat(),
+                # 质量门判定：与 CI/CLI 同源，未命中门限指标时为 null
+                "passed": gate_status(record.suite, metrics)["passed"],
             }
         )
-    return {"suites": dict(suites)}
+    gates = {suite: DEFAULT_GATES.get(suite, {}) for suite in used_suites}
+    return {"suites": dict(suites), "gates": gates}
 
 
 @router.get("/live")
