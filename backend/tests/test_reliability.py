@@ -7,10 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentforge.config import Settings
-from agentforge.core.events import RunFinished
+from agentforge.core.events import MemoryUpdated, RunFinished
 from agentforge.core.runtime import RunContext
 from agentforge.db.base import Base, build_engine
-from agentforge.db.models import ResearchReport, Run, User
+from agentforge.db.models import ResearchReport, Run, RunEvent, User
 from agentforge.services.runs import RunLimitExceeded, RunManager
 
 
@@ -69,6 +69,42 @@ async def test_run_manager_enforces_session_limit(tmp_path):
         )
     release.set()
     await manager._tasks[first]
+    await engine.dispose()
+
+
+async def test_late_cancel_does_not_flip_finished_run(tmp_path):
+    """终态事件发出后，收尾阶段（如长期记忆）被取消不得回退已完成状态。"""
+    engine, sessions = await _db(tmp_path)
+    manager = RunManager(sessions)
+    entered_tail = asyncio.Event()
+    release = asyncio.Event()
+
+    async def factory(ctx):
+        yield RunFinished(output={"text": "done"})
+        try:
+            entered_tail.set()
+            await release.wait()  # 模拟终态后的最佳努力收尾
+            yield MemoryUpdated(added=1)
+        except asyncio.CancelledError:
+            return
+
+    run_id = await manager.start(
+        user_id="u1", kind="chat", input={}, ctx=RunContext(), factory=factory
+    )
+    await asyncio.wait_for(entered_tail.wait(), timeout=2)
+    assert manager.cancel(run_id)
+    await manager._tasks[run_id]
+
+    async with sessions() as db:
+        run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one()
+        events = (
+            await db.execute(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq))
+        ).scalars().all()
+    assert run.status == "succeeded"
+    types = [e.type for e in events]
+    assert "run_finished" in types
+    # 完成之后不得再出现 run_cancelled / run_failed 这种矛盾终态
+    assert "run_cancelled" not in types and "run_failed" not in types
     await engine.dispose()
 
 

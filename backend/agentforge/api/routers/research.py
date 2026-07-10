@@ -38,10 +38,14 @@ def _make_research_factory(container: Container, report_id: str, query: str):
             max_revisions=container.settings.research_max_revisions,
             require_verified_sources=container.settings.search_provider != "mock",
         ):
+            # 缓冲终态事件：先把报告落库，再把 finished/failed 作为最后事件发出，
+            # 保证客户端见到"完成"时报告正文已可读。
             if isinstance(ev, RunFinished):
                 final = ev
-            elif isinstance(ev, RunFailed):
+                continue
+            if isinstance(ev, RunFailed):
                 failed = ev
+                continue
             yield ev
 
         async with container.sessions() as db:
@@ -58,6 +62,12 @@ def _make_research_factory(container: Container, report_id: str, query: str):
                 report.status = "failed"
                 report.review = {"error": failed.error if failed else "未知错误"}
             await db.commit()
+
+        # 落库完成后再发出缓冲的终态事件
+        if final is not None:
+            yield final
+        elif failed is not None:
+            yield failed
 
     return factory
 

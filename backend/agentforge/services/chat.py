@@ -1,5 +1,6 @@
 """对话服务：装配助手/团队 Agent，串联记忆、检索、引用与消息持久化。"""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -416,6 +417,7 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
 
         final_text = ""
         citation_cacheable = True
+        final_ev: RunFinished | None = None
         async for ev in agent.run(prepared, ctx):
             if isinstance(ev, RunFinished):
                 final_text = str(ev.output.get("text", ""))
@@ -448,7 +450,9 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
                 ev.output["text"] = final_text
                 ev.output["sources"] = sources
                 yield SourcesUpdated(sources=sources)
-                yield ev
+                # 缓冲终态事件：待落库完成后再作为最后一个事件发出，
+                # 避免"已完成"却因随后写库失败/取消而出现 finished→failed/cancelled 的矛盾序列。
+                final_ev = ev
             else:
                 yield ev
 
@@ -493,7 +497,11 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             )
             await db.commit()
 
-        # 4) 长期记忆抽取（失败不影响本轮结果）
+        # 6) 落库成功后再发出终态事件（客户端见到"完成"时消息已入库）
+        if final_ev is not None:
+            yield final_ev
+
+        # 7) 长期记忆抽取：终态之后的最佳努力收尾，失败或取消都不得回退已完成状态
         try:
             added = await ltm.extract_and_store(
                 ctx.user_id or "",
@@ -501,6 +509,8 @@ def make_chat_factory(container: Container, chat_session: ChatSession, user_mess
             )
             if added:
                 yield MemoryUpdated(added=added)
+        except asyncio.CancelledError:
+            logger.info("run %s 已完成，忽略收尾阶段取消", ctx.run_id)
         except Exception as e:  # noqa: BLE001
             logger.warning("长期记忆抽取失败: %s", e)
 

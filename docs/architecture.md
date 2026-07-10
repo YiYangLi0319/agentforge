@@ -67,6 +67,7 @@ sequenceDiagram
 
 - 每个 Run 的事件按 `seq` 递增持久化（`run_events` 表）；`llm_delta` 等瞬态事件只推送不落库（全量文本由 `assistant_message`/`report_draft` 兜底），避免 DB 膨胀；
 - Agent 每步产出 `Checkpoint`（完整消息快照）写入 `runs.checkpoint`。启动时遗留在途任务统一收敛为 `interrupted`；仅 chat 允许用户手动恢复，且用数据库 CAS 防止并发重复恢复。有副作用的研究工具不会被自动重放。
+- **终态一致性**：`run_finished` 被缓冲，等助手消息/报告落库后才作为最后事件发出，杜绝"完成→随后写库失败/取消"的 `finished→failed/cancelled` 矛盾序列；终态之后的最佳努力收尾（长期记忆抽取）吞掉取消，不会把已完成的 run 回退为 cancelled。
 
 ### 2.2 SSE 不丢不重
 
